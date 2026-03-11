@@ -27,7 +27,7 @@ class EmbeddingService
                 ->withHeaders([
                 'Authorization' => 'Bearer ' . env('OPENROUTER_API_KEY')
             ])->post('https://openrouter.ai/api/v1/embeddings', [
-                'model' => 'openai/text-embedding-3-small',
+                'model' => 'text-embedding-3-small',
                 'input' => $text
             ]);
 
