@@ -2,7 +2,6 @@
 namespace App\Services\ia;
 
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\Log;
 
 class EmbeddingService
 {
@@ -15,9 +14,6 @@ class EmbeddingService
     {
         $attempts = 0;
         $maxAttempts = 5;
-        Log::info("OPENROUTER KEY", [
-            'key' => env('OPENROUTER_API_KEY')
-        ]);
 
         do {
             $attempts++;
