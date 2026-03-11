@@ -6,6 +6,8 @@ use App\Http\Controllers\Controller;
 use App\Models\Conversation;
 use App\Models\Site;
 use App\Models\Visitor;
+use App\Models\WidgetSetting;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 
@@ -144,5 +146,53 @@ class WidgetVisitorController extends Controller
             ->get();
 
         return response()->json($conversations);
+    }
+
+    public function widgetConfig(string $site_id): JsonResponse
+    {
+        // =====================
+        // 🔍 1. Vérifier le site
+        // =====================
+        $site = Site::query()
+            ->where('id', $site_id)
+            ->first();
+
+        if (!$site) {
+            return response()->json([
+                'success' => false,
+                'error'   => 'SITE_NOT_FOUND',
+            ], 404);
+        }
+
+        // ======================================================
+        // ⚙️ 2. Créer les settings s'ils n'existent pas (Option B)
+        // ======================================================
+        $settings = WidgetSetting::query()->firstOrCreate(
+            ['site_id' => $site->id],
+            [
+                'id' => Str::uuid(),
+                'site_id' => $site->id,
+            ]
+        );
+
+        $settings->refresh();
+
+        // =====================================
+        // 🚫 3. Vérifier si le widget est activé
+        // =====================================
+        /*if (!$settings->widget_enabled) {
+            return response()->json([
+                'success' => false,
+                'error'   => 'WIDGET_DISABLED',
+            ], 403);
+        }*/
+
+        // =====================
+        // ✅ 4. Retourner la config
+        // =====================
+        return response()->json([
+            'success' => true,
+            'config' => $settings,
+        ]);
     }
 }

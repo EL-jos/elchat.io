@@ -2,6 +2,7 @@
 namespace App\Services\ia;
 
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 
 class EmbeddingService
 {
@@ -14,6 +15,9 @@ class EmbeddingService
     {
         $attempts = 0;
         $maxAttempts = 5;
+        Log::info("OPENROUTER KEY", [
+            'key' => env('OPENROUTER_API_KEY')
+        ]);
 
         do {
             $attempts++;
@@ -23,7 +27,7 @@ class EmbeddingService
                 ->withHeaders([
                 'Authorization' => 'Bearer ' . env('OPENROUTER_API_KEY')
             ])->post('https://openrouter.ai/api/v1/embeddings', [
-                'model' => 'text-embedding-3-small',
+                'model' => 'openai/text-embedding-3-small',
                 'input' => $text
             ]);
 

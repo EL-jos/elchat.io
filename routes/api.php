@@ -93,6 +93,7 @@ Route::prefix('v1')->group(function () {
             Route::get('conversations/{siteId}', 'visitorConversations');
             // Récupérer les messages d’une conversation d’un visitor
             Route::get('chat/{conversationId}/{siteId}', 'visitorMessages');
+            Route::get('/config/{siteId}', 'widgetConfig');
         });
     });
 });

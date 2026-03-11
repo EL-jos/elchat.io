@@ -38,7 +38,7 @@ class QueryAnalyzer
                 "query_type" => "factual",
                 "needs_conversation_context" => false,
                 "filters" => [],
-                "top_k" => 8,
+                "top_k" => 5,
                 "search_strategy" => "single"
             ];
         }
@@ -143,7 +143,7 @@ class QueryAnalyzer
             ? $data['filters']
             : [];
 
-        $plan->topK = intval($data['top_k'] ?? 8);
+        $plan->topK = intval($data['top_k'] ?? 5);
 
         $plan->searchStrategy = $data['search_strategy'] ?? 'single';
 
@@ -242,7 +242,7 @@ class QueryAnalyzer
             "query_type" => "factual",
             "needs_conversation_context" => false,
             "filters" => [],
-            "top_k" => 8,
+            "top_k" => 5,
             "search_strategy" => "single"
         ]);
     }
