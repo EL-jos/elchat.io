@@ -13,6 +13,7 @@ use App\Models\Site;
 use App\Models\WidgetSetting;
 use App\Services\CrawlService;
 use App\Services\IndexService;
+use App\Services\vector\VectorCreationService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
@@ -40,7 +41,7 @@ class SiteController extends Controller
     /**
      * Créer un nouveau site
      */
-    public function store(Request $request)
+    public function store(Request $request, VectorCreationService $vectorService)
     {
         $validated = $request->validate([
             'url' => 'required|url',
@@ -53,7 +54,7 @@ class SiteController extends Controller
             'include_pages.*' => 'string',
         ]);
 
-
+        // 1️⃣ Création du site en base
         $site = Site::create([
             'account_id' => auth()->user()->ownedAccount->id,
             'type_site_id' => $validated['type_site_id'],
@@ -66,7 +67,24 @@ class SiteController extends Controller
             'include_pages' => $validated['include_pages'] ?? null,
             'favicon' => $this->getGoogleFaviconSecure($validated['url']),
         ]);
+        
+        // 2️⃣ Création automatique de la collection Qdrant
+        $collectionCreated = $vectorService->createSiteCollection(
+            siteId: $site->id,
+            collection: "chunks_{$site->id}"
+        );
 
+        if (!$collectionCreated) {
+            // Optionnel : marquer le site en erreur
+            $site->update(['status' => 'error']);
+
+            return response()->json([
+                'message' => 'Site créé mais erreur lors de la création de la collection vectorielle.',
+                'site' => $site
+            ], 500);
+        }
+
+        // 3️⃣ Tout est OK
         return response()->json($site->load('type'), 201);
     }
     /**
@@ -364,16 +382,15 @@ class SiteController extends Controller
 
         // 🔹 URL à tester
         // Test local ou prod
-        $url = "http://127.0.0.1:5500/index.html"; // pour le test local
-        // $url = rtrim($site->url, '/') . '/'; // pour prod
+        //$url = "http://127.0.0.1:5500/index.html"; // pour le test local
+         $url = rtrim($site->url, '/') . '/'; // pour prod
 
         // 🔹 Tag attendu
-        /*$widgetTagPattern = sprintf(
-            '/<script\s+async\s+src="https:\/\/www\.domain\.com\/elchat\/js\?id=%s"><\/script>/',
-            preg_quote($site->id, '/')
-        );*/
+
+        // 🔹 Regex pour matcher le script widget
+        // Regex pour détecter le snippet exact du widget ELChat
         $widgetTagPattern = sprintf(
-            '/<script\b[^>]*\bsrc=["\']http:\/\/localhost:8000\/js\/widget\.js["\'][^>]*\bdata-site-id=["\']%s["\'][^>]*><\/script>/i',
+            '/<script\b[^>]*\bsrc=["\']https:\/\/elchat\.io\/js\/widget\.js["\'][^>]*\bdata-site-id=["\']%s["\'][^>]*>/i',
             preg_quote($site->id, '/')
         );
 
@@ -405,7 +422,7 @@ class SiteController extends Controller
             'message' => $message,
             'detected_tag' => $detected_tag,
             'tested_at' => now()->toISOString(),
-            'widget_expected_src' => "https://www.domain.com/elchat/js?id={$site->id}",
+            'widget_expected_src' => "https://elchat.io/elchat/js?id={$site->id}",
         ]);
     }
     /*public function widgetConfig(string $site_id): JsonResponse
@@ -578,6 +595,4 @@ class SiteController extends Controller
                 : "Recalcul du KQI pour tous les sites lancé."
         ]);
     }
-
-    
 }

@@ -3,6 +3,7 @@
 use App\Http\Middleware\EnsureAttemptToken;
 use App\Http\Middleware\EnsureUserIsVerified;
 use App\Http\Middleware\JwtAuthenticate;
+use App\Http\Middleware\VerifyWidgetOrigin;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
@@ -18,6 +19,7 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->alias([
             'verified' => EnsureUserIsVerified::class,
             'jwt.auth' => JwtAuthenticate::class,
+            'widget.origin' => VerifyWidgetOrigin::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {

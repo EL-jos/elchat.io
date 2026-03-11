@@ -75,6 +75,12 @@ class SitemapPageBatchJob implements ShouldQueue
                     $crawlJob->id
                 );
 
+                Log::info("Dans Sitemap Page Batch Job",[
+                    'siteId' => $site->name,
+                    'page' => $page ? $page->id : '***',
+                    'page_url'=> $page ? $page->url : '***'
+                ]); 
+
                 if ($page) {
                     $indexService->indexPage($page, [
                         'source' => 'sitemap',

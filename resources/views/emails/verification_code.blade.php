@@ -1,65 +1,147 @@
 <!DOCTYPE html>
-<html lang="en">
-
+<html lang="fr">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Document</title>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/7.0.1/css/all.min.css">
-    <link rel="stylesheet" href="{{ asset('assets/emails/css/verification-code.css') }}">
+    <title>Vérification de votre compte ELChat</title>
+    <meta name="x-apple-disable-message-reformatting">
 </head>
 
-<body>
-<div id="el-page-container">
-    <div id="el-card-container">
-        <div class="el-card-header">
-            <h2 class="el-title">Votre code de vérification OTP</h2>
-        </div>
-        <div class="el-card-body">
-            <p><strong>Bonjour, {{ \Illuminate\Support\Str::title($user->firstname) }}</strong></p>
+<body style="margin:0;padding:0;background-color:#ff9100;font-family:Helvetica,Arial,sans-serif;">
 
-            <p>
-                Vous avez initié la création de votre compte sur <strong>Quiz</strong>, la plateforme qui vous permet
-                d’évaluer vos compétences techniques en fonction des exigences réelles des offres d’emploi tech.
-            </p>
+<!-- BACKGROUND -->
+<table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="background-color:#ff9100;">
+    <tr>
+        <td align="center" style="padding:30px 10px;">
 
-            <p>
-                Veuillez utiliser le code de vérification ci-dessous pour confirmer votre adresse email :
-            </p>
-            <div class="el-container-code">
-                @foreach (str_split($code) as $char)
-                    <span class="el-code-item">{{ $char }}</span>
-                @endforeach
-            </div>
-            <p>
-                Ce code est valable pendant <strong>{{ $minutes }} minutes</strong>.
-            </p>
+            <!-- CARD -->
+            <table width="600" cellpadding="0" cellspacing="0" role="presentation"
+                   style="background-color:#ffffff;border-radius:8px;">
 
-            <p class="el-disable">
-                Pour des raisons de sécurité, ne partagez jamais ce code avec qui que ce soit.
-            </p>
+                <!-- HEADER -->
+                <tr>
+                    <td align="center"
+                        style="background-color:#fff3e0;padding:20px;border-radius:8px 8px 0 0;">
+                        <h2 style="margin:0;color:#333333;font-size:24px;line-height:28px;">
+                            Vérification de votre compte ELChat
+                        </h2>
+                    </td>
+                </tr>
 
-            <p class="el-disable">
-                Si vous n’êtes pas à l’origine de cette demande, vous pouvez ignorer cet email en toute sécurité.
-            </p>
+                <!-- BODY -->
+                <tr>
+                    <td style="padding:30px;color:#333333;font-size:15px;line-height:22px;">
 
-            <h3 class="el-best-regards">Cordialement,</h3>
-            <h3>L’équipe Quiz</h3>
+                        <p style="margin:0 0 15px 0;">
+                            <strong>Bonjour {{ \Illuminate\Support\Str::title($user->firstname) }},</strong>
+                        </p>
 
-        </div>
-        <div class="el-card-footer">
-            <div class="el-divider"></div>
-            <p>&copy; 2025 Quiz. All rights reserved.</p>
-            <div class="el-container">
-                <a href="https://www.facebook.com/"><i class="fa-brands fa-facebook-f"></i></a>
-                <a href="https://www.linkedin.com/"><i class="fa-brands fa-linkedin-in"></i></a>
-                <a href="https://www.instagram.com/"><i class="fa-brands fa-instagram"></i></a>
-                <a href="https://www.youtube.com/"><i class="fa-brands fa-youtube"></i></a>
-            </div>
-        </div>
-    </div>
-</div>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/7.0.1/js/all.min.js"></script>
+                        <p style="margin:0 0 15px 0;">
+                            Vous avez initié la création de votre compte sur <strong>ELChat</strong>,
+                            l’assistant intelligent conçu pour vous accompagner à tout moment.
+                            Il comprend vos questions, vous apporte des réponses claires et immédiates,
+                            et vous guide rapidement vers les informations essentielles du site que vous consultez —
+                            pour une navigation fluide, efficace et parfaitement adaptée à vos besoins.
+                        </p>
+
+                        <p style="margin:0 0 15px 0;">
+                            Pour finaliser la sécurisation de votre compte, veuillez utiliser le code de vérification ci-dessous :
+                        </p>
+
+                        <!-- OTP CONTAINER -->
+                        <table width="100%" cellpadding="0" cellspacing="0" role="presentation"
+                               style="background-color:#fff8f1;border-radius:4px;">
+                            <tr>
+                                <td align="center" style="padding:20px;">
+
+                                    <!-- OTP ROW -->
+                                    <table cellpadding="0" cellspacing="0" role="presentation">
+                                        <tr>
+                                            @foreach (str_split($code) as $char)
+
+                                                <td align="center"
+                                                    style="
+                                                        border:2px solid #ff9100;
+                                                        background-color:#ffe0b2;
+                                                        padding:12px 16px;
+                                                        font-size:18px;
+                                                        font-weight:bold;
+                                                        color:#333333;
+                                                        line-height:20px;
+                                                        border-radius:4px;
+                                                    ">
+                                                    {{ $char }}
+                                                </td>
+
+                                                @if (!$loop->last)
+                                                    <td width="8" style="font-size:0;line-height:0;">&nbsp;</td>
+                                                @endif
+
+                                            @endforeach
+                                        </tr>
+                                    </table>
+
+                                </td>
+                            </tr>
+                        </table>
+
+                        <p style="margin:20px 0 0 0;">
+                            Ce code est valable pendant <strong>{{ $minutes }} minutes</strong>.
+                        </p>
+
+                        <p style="margin:15px 0 0 0;color:#999999;font-size:13px;line-height:18px;">
+                            Pour des raisons de sécurité, ne partagez jamais ce code avec qui que ce soit.
+                        </p>
+
+                        <p style="margin:10px 0 0 0;color:#999999;font-size:13px;line-height:18px;">
+                            Si vous n’êtes pas à l’origine de cette demande, vous pouvez ignorer cet email en toute sécurité.
+                        </p>
+
+                        <p style="margin:25px 0 0 0;color:#666666;">
+                            Bienvenue dans une expérience digitale plus intelligente,<br>
+                            <strong style="color:#333333;">L’équipe ELChat</strong>
+                        </p>
+
+                    </td>
+                </tr>
+
+                <!-- FOOTER -->
+                <tr>
+                    <td align="center"
+                        style="padding:20px;border-top:1px solid #eeeeee;border-radius:0 0 8px 8px;">
+
+                        <p style="margin:0;font-size:13px;color:#999999;line-height:18px;">
+                            © 2026 ELChat. Tous droits réservés.
+                        </p>
+
+                        <!-- SOCIAL ICONS -->
+                        <table cellpadding="0" cellspacing="0" role="presentation" style="margin-top:12px;">
+                            <tr>
+                                <td style="padding:0 6px;">
+                                    <a href="https://linkedin.com" target="_blank">
+                                        <img src="https://cdn-icons-png.flaticon.com/512/733/733561.png"
+                                             width="20" height="20" alt="LinkedIn"
+                                             style="display:block;border:0;">
+                                    </a>
+                                </td>
+                                <td style="padding:0 6px;">
+                                    <a href="https://twitter.com" target="_blank">
+                                        <img src="https://cdn-icons-png.flaticon.com/512/733/733579.png"
+                                             width="20" height="20" alt="Twitter"
+                                             style="display:block;border:0;">
+                                    </a>
+                                </td>
+                            </tr>
+                        </table>
+
+                    </td>
+                </tr>
+
+            </table>
+            <!-- END CARD -->
+
+        </td>
+    </tr>
+</table>
+
 </body>
-
 </html>

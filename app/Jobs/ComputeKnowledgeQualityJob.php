@@ -16,6 +16,7 @@ class ComputeKnowledgeQualityJob implements ShouldQueue
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public ?string $siteId;
+    public int $timeout = 600; // 10 minutes
 
     /**
      * Create a new job instance.

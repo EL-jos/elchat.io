@@ -205,7 +205,7 @@ class UserController extends Controller
                 'per_page'  => $paginator->perPage(),
             ],
             'summary' => $summary
-        ]);
+        ], 200, [], JSON_INVALID_UTF8_SUBSTITUTE);
     }
 
     public function show(string $userId, string $siteId)

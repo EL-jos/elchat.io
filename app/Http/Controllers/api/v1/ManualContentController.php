@@ -10,6 +10,7 @@ use Illuminate\Http\Request;
 
 class ManualContentController extends Controller
 {
+    public function __construct(protected IndexService $indexService) {}
     public function store(Request $request, Site $site)
     {
 
@@ -25,9 +26,10 @@ class ManualContentController extends Controller
             'title' => $validated['title'],
             'url' => null,
             'content' => $validated['content'],
+            'is_indexed' => false
         ]);
 
-        app(IndexService::class)->indexPage($page, [
+        $this->indexService->indexPage($page, [
             'source' => $page->source,
             'site_id' => $site->id,
         ]);

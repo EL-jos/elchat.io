@@ -4,8 +4,15 @@ namespace App\Http\Controllers\api\v1;
 
 use App\Mail\ResetPasswordCodeMail;
 use App\Models\Account;
+use App\Models\Conversation;
+use App\Models\Message;
 use App\Models\Role;
 use App\Models\Site;
+use App\Models\Visitor;
+use Facebook\Exceptions\FacebookResponseException;
+use Facebook\Exceptions\FacebookSDKException;
+use Facebook\Facebook;
+use Google\Client as GoogleClient;
 use OpenApi\Annotations as OA;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\RegisterRequest;
@@ -26,10 +33,10 @@ use Illuminate\Support\Str;
 use Throwable;
 use Tymon\JWTAuth\Exceptions\JWTException;
 use Tymon\JWTAuth\Facades\JWTAuth;
+use Laravel\Socialite\Facades\Socialite;
 
 class AuthController extends Controller
 {
-
     /**
      * @OA\Post(
      *     path="/api/v1/register",
@@ -92,7 +99,8 @@ class AuthController extends Controller
                     'firstname' => $payload['firstname'],
                     'lastname' => $payload['lastname'],
                     'email'     => $payload['email'],
-                    'password'  => Hash::make($payload['password']),
+                    'phone'     => $payload['phone'],
+                    'password'  => Hash::make($payload['password'] ?? Str::random(16)),
                     'is_verified' => false,
                 ]);
 
@@ -116,9 +124,6 @@ class AuthController extends Controller
                     ]);
                 }
 
-
-
-
                 // 3️⃣ Create verification code
                 $code = UserVerification::generateCode();
 
@@ -126,7 +131,7 @@ class AuthController extends Controller
                     'user_id' => $user->id,
                     'code' => hash('sha256', $code),
                     'attempts' => 0,
-                    'expires_at' => now()->addMinute(),
+                    'expires_at' => now()->addMinute(5),
                     'type' => 'email_verification'
                 ]);
 
@@ -163,7 +168,6 @@ class AuthController extends Controller
             return response()->json(['error' => 'server_error'], 500);
         }
     }
-
     /**
      * @OA\Post(
      *     path="/api/v1/resend-code",
@@ -218,7 +222,7 @@ class AuthController extends Controller
                 [],
                 ['email' => $user->email]
             );
-            return response()->json(['error' => 'too_many_requests'], 429);
+            return response()->json(['error' => 'too_many_requests', 'message' => "trop de demandes"], 429);
         }
 
         // Invalidate previous codes
@@ -233,7 +237,7 @@ class AuthController extends Controller
             'user_id' => $user->id,
             'code' => hash('sha256', $code),
             'attempts' => 0,
-            'expires_at' => now()->addMinute(),
+            'expires_at' => now()->addMinute(5),
             'type' => 'email_verification'
         ]);
 
@@ -254,7 +258,6 @@ class AuthController extends Controller
 
         return response()->json(['ok' => true, 'message' => 'Nouveau code envoyé']);
     }
-
     /**
      * @OA\Post(
      *     path="/api/v1/verify-code",
@@ -350,7 +353,7 @@ class AuthController extends Controller
                     'user_id' => $user->id,
                     'code' => hash('sha256', $newCode),
                     'attempts' => 0,
-                    'expires_at' => now()->addMinute(),
+                    'expires_at' => now()->addMinute(5),
                     'type' => 'email_verification'
                 ]);
 
@@ -397,6 +400,17 @@ class AuthController extends Controller
         // Auto-login
         $token = JWTAuth::fromUser($user);
 
+        // Si le frontend passe visitor_uuid
+        if ($visitorUuid = request('visitor_uuid')) {
+            $visitor = Visitor::where('uuid', $visitorUuid)
+                ->where('site_id', $request->site_id)
+                ->first();
+
+            if ($visitor) {
+                $this->transformVisitorToUser($visitor, $user);
+            }
+        }
+
         // Attach user to site if provided
         $this->attachUserToSiteIfNeeded($user, $request->site_id);
 
@@ -406,7 +420,6 @@ class AuthController extends Controller
             'user' => $user,
         ]);
     }
-
     /**
      * @OA\Post(
      *     path="/api/v1/login",
@@ -445,16 +458,58 @@ class AuthController extends Controller
      */
     public function login(Request $request)
     {
-        $request->validate([
-            'email' => 'required|email',
-            'password' => 'required',
-            'site_id' => 'nullable|uuid|exists:sites,id'
+        $payload = $request->validate([
+            'email' => 'required_without_all:google_token,facebook_token|email',
+            'password' => 'required_without_all:google_token,facebook_token',
+            'site_id' => 'nullable|uuid|exists:sites,id',
+            'google_token' => 'nullable|string',
+            'facebook_token' => 'nullable|string',
         ]);
+
+        // 🔵 GOOGLE FLOW
+        if(!empty($payload['google_token'])){
+            $client = new GoogleClient([
+                'client_id' => env('GOOGLE_CLIENT_ID'),
+            ]);
+
+            $googleData = $client->verifyIdToken($request->google_token);
+
+            if (!$googleData) {
+                return response()->json(['error' => 'Invalid Google token'], 401);
+            }
+
+            // Récupération email + prénom/nom
+            $payload['email'] = $googleData['email'];
+            $payload['firstname'] = $googleData['given_name'] ?? '';
+            $payload['lastname'] = $googleData['family_name'] ?? '';
+        }
+
+        // 🔵 FACEBOOK FLOW
+        if(!empty($payload['facebook_token'])) {
+            $fb = new Facebook([
+                'app_id' => env('FACEBOOK_APP_ID'),
+                'app_secret' => env('FACEBOOK_APP_SECRET'),
+                'default_graph_version' => 'v17.0',
+            ]);
+
+            try {
+                $response = $fb->get('/me?fields=id,first_name,last_name,email', $payload['facebook_token']);
+                $fbData = $response->getGraphUser();
+
+                $payload['email'] = $fbData->getEmail();
+                $payload['firstname'] = $fbData->getFirstName() ?? '';
+                $payload['lastname'] = $fbData->getLastName() ?? '';
+            } catch (FacebookResponseException $e) {
+                return response()->json(['error' => 'Invalid Facebook token'], 401);
+            } catch (FacebookSDKException $e) {
+                return response()->json(['error' => 'Facebook SDK error'], 500);
+            }
+        }
 
         /**
          * @var User $user
          */
-        $user = User::where('email', $request->email)->whereNull('deleted_at')->first();
+        $user = User::where('email', $payload['email'])->whereNull('deleted_at')->first();
 
         if (! $user) {
             AuditLogger::event(
@@ -481,10 +536,15 @@ class AuthController extends Controller
             ], 403);
         }
 
-        $credentials = $request->only('email', 'password');
+        if(!empty($payload['google_token']) || !empty($payload['facebook_token'])){
+            // Générer le token JWT
+            $token = JWTAuth::fromUser($user);
+        }else{
+            $credentials = $request->only('email', 'password');
 
-        if (! $token = JWTAuth::attempt($credentials)) {
-            return response()->json(['error' => 'invalid_credentials'], 401);
+            if (! $token = JWTAuth::attempt($credentials)) {
+                return response()->json(['error' => 'invalid_credentials'], 401);
+            }
         }
 
         AuditLogger::event(
@@ -495,14 +555,23 @@ class AuthController extends Controller
             ['logged_in_at' => now()]
         );
 
+        if ($visitorUuid = request('visitor_uuid')) {
+            $visitor = Visitor::where('uuid', $visitorUuid)
+                ->where('site_id', $request->site_id)
+                ->first();
+
+            if ($visitor) {
+                $this->transformVisitorToUser($visitor, $user);
+            }
+        }
+
         $this->attachUserToSiteIfNeeded($user, $request->site_id);
 
         return response()->json([
             'token' => $token,
-            'user' => auth()->user(),
+            'user' => !empty($payload['google_token']) || !empty($payload['facebook_token']) ? $user : auth()->user(),
         ]);
     }
-
     /**
      * @OA\Post(
      *     path="/api/v1/refresh-token",
@@ -581,7 +650,6 @@ class AuthController extends Controller
             return response()->json(['error' => 'token_absent'], 401);
         }
     }
-
     /**
      * @OA\Post(
      *     path="/api/v1/logout",
@@ -626,7 +694,6 @@ class AuthController extends Controller
             ], 500);
         }
     }
-
     /**
      * @OA\Post(
      *     path="/api/v1/forgot-password",
@@ -718,7 +785,6 @@ class AuthController extends Controller
             'expires_in' => 15
         ]);
     }
-
     /**
      * @OA\Post(
      *     path="/api/v1/reset-password",
@@ -823,7 +889,6 @@ class AuthController extends Controller
             'message' => 'Mot de passe réinitialisé avec succès'
         ]);
     }
-
     protected function errorResponse(
         string $message,
         string $errorCode,
@@ -834,7 +899,6 @@ class AuthController extends Controller
             'error_code' => $errorCode,
         ], $status);
     }
-
     private function attachUserToSiteIfNeeded(User $user, ?string $siteId): void
     {
         if (! $siteId) {
@@ -858,5 +922,67 @@ class AuthController extends Controller
                 'last_seen_at' => $now,
             ]);
         }
+    }
+
+    public function redirectToGoogle(Request $request)
+    {
+        $siteId = $request->query('site_id');
+
+        session(['site_id' => $siteId]);
+
+        return Socialite::driver('google')
+            ->stateless()
+            ->redirect();
+    }
+    public function handleGoogleCallback()
+    {
+        $googleUser = Socialite::driver('google')->stateless()->user();
+
+        $siteId = session('site_id');
+
+        $user = User::firstOrCreate(
+            ['email' => $googleUser->getEmail()],
+            [
+                'firstname' => $googleUser->user['given_name'] ?? '',
+                'lastname' => $googleUser->user['family_name'] ?? '',
+                'password' => Hash::make(Str::random(16)),
+                'is_verified' => true,
+                'role_id' => Role::where('name','visitor')->first()->id,
+            ]
+        );
+
+        if ($siteId) {
+            $site = Site::findOrFail($siteId);
+            $site->users()->syncWithoutDetaching([$user->id]);
+            $this->attachUserToSiteIfNeeded($user, $siteId);
+        }
+
+        $token = $user->createToken('widget')->plainTextToken;
+
+        return response()->view('oauth-callback', [
+            'token' => $token,
+            'user' => $user
+        ]);
+    }
+
+    protected function transformVisitorToUser(Visitor $visitor, User $user)
+    {
+        // 1️⃣ Associer le visitor à l'user
+        $visitor->user_id = $user->id;
+        $visitor->save();
+
+        // 2️⃣ Migrer les conversations du visitor vers l'user
+        Conversation::where('visitor_id', $visitor->id)
+            ->update(['user_id' => $user->id]);
+
+        // 3️⃣ Optionnel: mettre à jour toutes les messages si nécessaire
+        Message::whereIn('conversation_id', function($q) use ($visitor) {
+            $q->select('id')
+                ->from('conversations')
+                ->where('visitor_id', $visitor->id);
+        })->update(['user_id' => $user->id]);
+
+        // 4️⃣ Attacher l'utilisateur au site si nécessaire
+        //$this->attachUserToSiteIfNeeded($user, $visitor->site_id);
     }
 }

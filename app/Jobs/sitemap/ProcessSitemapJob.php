@@ -21,6 +21,7 @@ class ProcessSitemapJob implements ShouldQueue
 
     public function handle()
     {
+
         $site = Site::findOrFail($this->siteId);
         $document = Document::findOrFail($this->sitemapDocumentId);
 
@@ -36,7 +37,7 @@ class ProcessSitemapJob implements ShouldQueue
         $exclude = $site->exclude_pages ?? [];
 
         $created = 0;
-
+        
         foreach ($xml->url as $node) {
             $url = (string) $node->loc;
 
@@ -55,6 +56,10 @@ class ProcessSitemapJob implements ShouldQueue
                 $created++;
             }
         }
+
+        Log::info("Dans Process Sitemap",[
+            'created' => $created,
+        ]); 
 
         if ($created === 0) {
             $this->finishIfNoJobs($site);

@@ -4,7 +4,7 @@ namespace App\Jobs\product;
 
 use App\Models\Document;
 use App\Models\Site;
-use App\Services\Product\ProductReindexService;
+use App\Services\product\ProductReindexService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;

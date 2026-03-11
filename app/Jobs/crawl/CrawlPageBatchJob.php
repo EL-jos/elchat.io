@@ -106,5 +106,3 @@ class CrawlPageBatchJob implements ShouldQueue
         ]);
     }
 }
-
-

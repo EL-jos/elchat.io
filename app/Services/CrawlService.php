@@ -9,6 +9,7 @@ use Illuminate\Support\Str;
 use Symfony\Component\BrowserKit\HttpBrowser;
 use Symfony\Component\DomCrawler\Crawler;
 use Symfony\Component\HttpClient\HttpClient;
+use Symfony\Component\HttpClient\CurlHttpClient;
 
 class CrawlService
 {
@@ -67,6 +68,13 @@ class CrawlService
         ?string $crawlJobId = null
     ): ?Page {
 
+        Log::info("Dans Crawl Single Page", [
+            'site_id' => $site->id,
+            'url'     => $url,
+            'depth'   => $depth,
+            'crawlJobId' => $crawlJobId,
+        ]);
+
         // 🔒 RÈGLE ABSOLUE : jamais scrapper une page exclue
         if ($this->isExcluded($url, $site)) {
             Log::info("URL exclue ignorée (no scrape): {$url}", [
@@ -76,10 +84,14 @@ class CrawlService
         }
 
         try {
+
             $client = new HttpBrowser(HttpClient::create([
                 'timeout' => 60,
                 'headers' => [
-                    'User-Agent' => 'Mozilla/5.0 (compatible; CrawlBot/1.0)',
+                    'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                    'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language' => 'fr-FR,fr;q=0.9,en;q=0.8',
+                    'Connection' => 'keep-alive',
                 ],
             ]));
 
@@ -139,8 +151,8 @@ class CrawlService
             $textLength = mb_strlen(trim($node->text()));
             $linkCount  = $node->filter('a')->count();
 
-            if ($textLength < 300) return;
-            if ($linkCount > ($textLength / 100)) return;
+            //if ($textLength < 300) return;
+            //if ($linkCount > ($textLength / 100)) return;
 
             $score = $textLength - ($linkCount * 50);
             if ($score > $bestScore) {
@@ -187,7 +199,7 @@ class CrawlService
             }
 
             $text = trim($node->text());
-            if (mb_strlen($text) > 40) {
+            if (mb_strlen($text) > 0 /*40*/) {
                 $buffer[] = $text;
             }
         });
@@ -205,7 +217,7 @@ class CrawlService
     private function extractLooseSections(Crawler $content): array
     {
         $text = trim(preg_replace('/\s+/', ' ', $content->text()));
-        if (mb_strlen($text) < 300) return [];
+        if (mb_strlen($text) < 0/*300*/) return [];
 
         $sentences = preg_split('/(?<=[.!?])\s+/', $text);
         $sections = [];
@@ -223,7 +235,7 @@ class CrawlService
             }
         }
 
-        if (mb_strlen($buffer) > 200) {
+        if (mb_strlen($buffer) > 0/*200*/) {
             $sections[] = [
                 'title'   => null,
                 'content' => trim($buffer),

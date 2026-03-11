@@ -22,13 +22,16 @@ class RegisterRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'firstname' => 'required|string|max:255',
-            'lastname'  => 'required|string|max:255',
-            'email'     => 'required|email|unique:users,email',
-            'password'  => 'required|string|min:6|confirmed',
+            'firstname' => 'required_without_all:google_token,facebook_token|string|max:255',
+            'lastname'  => 'required_without_all:google_token,facebook_token|string|max:255',
+            'email'     => 'required_without_all:google_token,facebook_token|email|unique:users,email',
+            'phone'     => 'nullable|unique:users,phone',
+            'password'  => 'required_without_all:google_token,facebook_token|string|min:6|confirmed',
             'is_admin'  => 'required|boolean',
             'account_name' => 'required_if:is_admin,true|string|max:255',
             'site_id' => 'required_if:is_admin,false|uuid|exists:sites,id',
+            'google_token' => 'nullable|string',
+            'facebook_token' => 'nullable|string', 
         ];
     }
 }

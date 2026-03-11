@@ -6,7 +6,7 @@ use App\Http\Controllers\api\v1\AIRoleController;
 use App\Http\Controllers\api\v1\ChatController;
 use App\Http\Controllers\api\v1\ChunkController;
 use App\Http\Controllers\api\v1\ConversationController;
-use App\Http\Controllers\Api\V1\DashboardController;
+use App\Http\Controllers\api\v1\DashboardController;
 use App\Http\Controllers\api\v1\DocumentController;
 use App\Http\Controllers\api\v1\ManualContentController;
 use App\Http\Controllers\api\v1\PageController;
@@ -14,6 +14,7 @@ use App\Http\Controllers\api\v1\SitemapController;
 use App\Http\Controllers\api\v1\TypeSiteController;
 use App\Http\Controllers\api\v1\UserController;
 use App\Http\Controllers\api\v1\WidgetSettingController;
+use App\Http\Controllers\api\v1\WidgetVisitorController;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\api\v1\SiteController;
 use App\Http\Controllers\api\v1\AuthController;
@@ -82,6 +83,17 @@ Route::prefix('v1')->group(function () {
     });
     Route::controller(SiteController::class)->group(function () {
         Route::get('/site/{site_id}/widget/config', 'widgetConfig');
+    });
+    Route::post('/login/token', [AuthController::class, 'loginWithToken']);
+    Route::prefix('widget')->group(function () {
+        Route::controller(WidgetVisitorController::class)->group(function () {
+            Route::post('/visitor/init', 'init');
+            Route::post('/chat', 'chat');
+            // Récupérer toutes les conversations d’un visitor
+            Route::get('conversations/{siteId}', 'visitorConversations');
+            // Récupérer les messages d’une conversation d’un visitor
+            Route::get('chat/{conversationId}/{siteId}', 'visitorMessages');
+        });
     });
 });
 

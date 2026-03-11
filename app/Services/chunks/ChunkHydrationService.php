@@ -4,6 +4,7 @@ namespace App\Services\chunks;
 
 use App\Models\Chunk;
 use App\Models\Message;
+use Illuminate\Support\Facades\Log;
 
 class ChunkHydrationService
 {
@@ -12,6 +13,7 @@ class ChunkHydrationService
      */
     public function hydrate(array $qdrantResults): array
     {
+        //Log::info("resultat QDRANT", $qdrantResults);
         if (empty($qdrantResults)) {
             return [];
         }
@@ -37,19 +39,38 @@ class ChunkHydrationService
 
         foreach ($qdrantResults as $result) {
             $chunk = $chunks->get($result['id']);
+            if (!$chunk) continue;
 
-            if (!$chunk) {
-                continue; // sécurité prod
+            $textContent = '';
+
+            // Décoder JSON
+            $decoded = json_decode($chunk->text, true);
+            if (is_array($decoded)) {
+                // Extraire les contenus existants
+                $contents = array_filter(array_map(fn($c) => $c['content'] ?? null, $decoded));
+                $textContent = implode('. ', $contents);
+            }
+
+            // Fallback texte brut si JSON invalide
+            if (empty($textContent)) {
+                $textContent = $chunk->text;
             }
 
             $hydrated[] = [
-                'id'           => $chunk->id,
-                'text'         => $chunk->text,
+                'id' => $chunk->id,
+                'text' => $textContent,
                 'vector_score' => $result['score'] ?? 0.0,
-                'priority'     => $chunk->priority ?? 100,
-                'source_type'  => $chunk->source_type ?? 'unknown',
-                'metadata'     => $chunk->metadata,
+                'priority' => $chunk->priority ?? 100,
+                'source_type' => $chunk->source_type ?? 'unknown',
+                'metadata' => $chunk->metadata,
             ];
+
+            /*Log::info('Hydrated chunk text', [
+                'id' => $chunk->id,
+                'text_length' => strlen($textContent),
+                'text_preview' => substr($textContent, 0, 50),
+                'text' => $textContent,
+            ]);*/ 
         }
 
         return $hydrated;
@@ -57,6 +78,7 @@ class ChunkHydrationService
 
     public function hydrateMessages(array $qdrantMessageResults): array
     {
+        //Log::info("resultat QDRANT Message", $qdrantMessageResults);
         if (empty($qdrantMessageResults)) {
             return [];
         }

@@ -27,6 +27,7 @@ class ProductReindexService
         int $perPage = 20,
         ?string $search = null
     ): LengthAwarePaginator {
+        
         Log::info('[PRODUCT LIST] Début listing produits', [
             'site_id' => $siteId,
             'page' => $page,

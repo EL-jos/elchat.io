@@ -26,7 +26,7 @@ class WelcomeMail extends Mailable
 
     public function build()
     {
-        return $this->subject("Bienvenue sur PharmaStock 🎉")
+        return $this->subject("Bienvenue sur ELChat")
             ->view('emails.welcome');
     }
 }

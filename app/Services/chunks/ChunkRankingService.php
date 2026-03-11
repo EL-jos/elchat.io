@@ -2,12 +2,16 @@
 
 namespace App\Services\chunks;
 
+use Illuminate\Support\Facades\Log;
+
 class ChunkRankingService
 {
     protected array $sourceWeights = [
-        'manuel'      => 1.0,
+        'manuel'      => 0.97,
         'woocommerce' => 0.95,
-        'page'        => 0.9,
+        'page'        => 0.95,
+        'crawl'       => 0.95,
+        'import'      => 0.95,
         'document'    => 0.85,
         'sitemap'     => 0.7,
         'unknown'     => 0.6,
@@ -19,7 +23,7 @@ class ChunkRankingService
 
             $priorityWeight = 1 / (1 + max(1, (int)$chunk['priority']));
             $sourceWeight = $this->sourceWeights[$chunk['source_type']] ?? 0.6;
-
+ 
             $finalScore =
                 ($chunk['vector_score'] * 0.65)
                 + ($priorityWeight * 0.20)
@@ -34,6 +38,8 @@ class ChunkRankingService
         usort($ranked, fn ($a, $b) =>
             $b['final_score'] <=> $a['final_score']
         );
+
+        //Log::info("Chunk Ranking", $ranked);
 
         return array_slice($ranked, 0, $limit);
     }

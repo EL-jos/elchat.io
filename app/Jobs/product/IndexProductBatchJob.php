@@ -11,6 +11,7 @@ use Illuminate\Foundation\Queue\Queueable;
 class IndexProductBatchJob implements ShouldQueue
 {
     use Queueable;
+    public $timeout = 300;
 
     /**
      * Create a new job instance.

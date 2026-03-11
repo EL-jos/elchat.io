@@ -74,5 +74,4 @@ return [
     - citer un élément non présent mot pour mot
     - déduire une information à partir d’un autre message
     PROMPT,
-
 ];

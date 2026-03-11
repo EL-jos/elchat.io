@@ -35,8 +35,8 @@ class GenerateSitemapJob implements ShouldQueue
         $baseUrl = rtrim($site->url, '/');
 
         $client = new HttpBrowser(HttpClient::create([
-            'timeout' => 5,
-            'max_redirects' => 3,
+            'timeout' => 60,
+            //'max_redirects' => 3,
         ]));
 
         $host = parse_url($baseUrl, PHP_URL_HOST);

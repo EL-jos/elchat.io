@@ -18,7 +18,9 @@ class EmbeddingService
         do {
             $attempts++;
 
-            $response = Http::withHeaders([
+            $response = Http::timeout(15)
+                ->retry(3, 500)
+                ->withHeaders([
                 'Authorization' => 'Bearer ' . env('OPENROUTER_API_KEY')
             ])->post('https://openrouter.ai/api/v1/embeddings', [
                 'model' => 'text-embedding-3-small',

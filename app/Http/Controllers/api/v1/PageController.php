@@ -5,65 +5,81 @@ namespace App\Http\Controllers\api\v1;
 use App\Http\Controllers\Controller;
 use App\Jobs\PageImportJob;
 use App\Jobs\RecrawlSinglePageJob;
+use App\Models\Chunk;
 use App\Models\Document;
 use App\Models\Page;
 use App\Models\Site;
+use App\Services\vector\VectorIndexService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 class PageController extends Controller
 {
-    /**
-     * Display a listing of the resource.
-     */
-    public function index()
-    {
-        //
-    }
-
-    /**
-     * Store a newly created resource in storage.
-     */
-    public function store(Request $request)
-    {
-        //
-    }
-
-    /**
-     * Display the specified resource.
-     */
-    public function show(Page $page)
-    {
-        //
-    }
-
-    /**
-     * Update the specified resource in storage.
-     */
-    public function update(Request $request, Page $page)
-    {
-        //
-    }
 
     /**
      * Remove the specified resource from storage.
      */
-    public function destroy(Page $page)
+    public function destroy(Page $page, VectorIndexService $vectorIndexService)
     {
-        $page->delete();
+
+        DB::transaction(function () use (&$page, &$vectorIndexService) {
+
+
+            // 1️⃣ Récupérer les chunks liés
+            $chunkIds = $page->chunks()->pluck('id')->toArray();
+            dd($page->site_id, $chunkIds);
+
+            // 2️⃣ Supprimer les vecteurs dans Qdrant (non bloquant)
+            $vectorIndexService->deleteChunksBatch($chunkIds, "chunks_{$page->site_id}");
+
+            // 3️⃣ Supprimer les chunks en base
+            $page->chunks()->delete();
+
+            // 4️⃣ Supprimer la page
+            $page->delete();
+        });
+
 
         return response()->json([
             'message' => 'Page deleted successfully'
         ]);
     }
 
-    public function destroyMultiple(Request $request)
+    public function destroyMultiple(Request $request, VectorIndexService $vectorIndexService)
     {
         $ids = $request->input('ids', []);
 
-        Page::whereIn('id', $ids)->delete();
+        if (empty($ids)) {
+            return response()->json([
+                'message' => 'No pages selected'
+            ], 400);
+        }
+
+        DB::transaction(function () use ($ids, $vectorIndexService) {
+
+            // 1️⃣ Récupérer toutes les pages
+            $pages = Page::whereIn('id', $ids)->get();
+
+            // 2️⃣ Récupérer tous les chunk IDs liés
+            $chunkIds = Chunk::whereIn('page_id', $ids)
+                ->pluck('id')
+                ->toArray();
+
+            // 3️⃣ Supprimer les pages (chunks supprimés après)
+            Page::whereIn('id', $ids)->delete();
+
+            // 4️⃣ Supprimer les chunks en base
+            Chunk::whereIn('page_id', $ids)->delete();
+
+            // 5️⃣ Supprimer les vecteurs après commit
+            DB::afterCommit(function () use ($chunkIds, $vectorIndexService) {
+                $vectorIndexService->deleteChunksBatch($chunkIds);
+            });
+
+        });
 
         return response()->json([
             'message' => 'Pages deleted successfully'

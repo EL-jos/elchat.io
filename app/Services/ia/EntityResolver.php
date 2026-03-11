@@ -4,6 +4,7 @@ namespace App\Services\ia;
 
 use App\Models\Chunk;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Log;
 
 class EntityResolver
 {
@@ -13,6 +14,10 @@ class EntityResolver
         $processedEntities = [];
 
         foreach ($rankedChunks as $chunk) {
+
+            /*Log::info("EXEMPLE CHUNK", [
+                "chunk" => $chunk,
+            ]);*/
 
             $metadata = $chunk['metadata'] ?? [];
             $sourceType = $chunk['source_type'] ?? null;
@@ -61,31 +66,57 @@ class EntityResolver
             }
 
             // --- AUTRES TYPES À RECONSTRUIRE ---
-            if (in_array($sourceType, ['crawl', 'sitemap', 'manual', 'document'])) {
+            if (in_array($sourceType, ['crawl', 'sitemap', 'manual', 'document', 'import'])) {
 
-                // Déterminer la clé unique de l'entité
-                $entityKey = $sourceType . '_' . ($chunk['document_id'] ?? $chunk['page_id'] ?? $chunk['id']);
+                $originalChunk = Chunk::find($chunk['id']);
+
+                if (!$originalChunk) {
+                    $resolved->push($chunk);
+                    continue;
+                } 
+
+                // 🔎 Déterminer la clé unique selon le type
+                if (in_array($sourceType, ['document'])) {
+                    $entityId = $originalChunk->document_id;
+                } else {
+                    $entityId = $originalChunk->page_id;
+                }
+
+                if (!$entityId) {
+                    $resolved->push($chunk);
+                    continue;
+                }
+
+                $entityKey = $sourceType . '_' . $entityId;
+
                 if (in_array($entityKey, $processedEntities)) {
                     continue;
                 }
+
                 $processedEntities[] = $entityKey;
 
-                // Récupération de tous les chunks associés à cette entité
-                $query = Chunk::query()->where('source_type', $sourceType);
+                // 🔄 Récupération propre des chunks liés
+                $query = Chunk::where('source_type', $sourceType);
 
-                if (isset($chunk['document_id'])) {
-                    $query->where('document_id', $chunk['document_id']);
-                } elseif (isset($chunk['page_id'])) {
-                    $query->where('page_id', $chunk['page_id']);
+                if ($sourceType === 'document') {
+                    $query->where('document_id', $entityId);
+                } else {
+                    $query->where('page_id', $entityId);
                 }
 
-                $allChunks = $query->get();
+                $allChunks = $query->orderBy('created_at')->get();
 
-                // Reconstitution du texte global
+                if ($allChunks->isEmpty()) {
+                    $resolved->push($chunk);
+                    continue;
+                }
+
                 $combinedText = $allChunks->pluck('text')->implode('. ');
+
                 $chunk['text'] = $combinedText;
 
                 $resolved->push($chunk);
+
                 continue;
             }
 
@@ -96,3 +127,4 @@ class EntityResolver
         return $resolved->toArray();
     }
 }
+ 

@@ -41,7 +41,7 @@ class IndexService
 
 
                 if ($this->chunkAlreadyExists($page, $textChunk)) continue;
-
+                if (trim($textChunk) === '') continue;
                 $embedding = $this->embeddingService->getEmbedding($textChunk);
 
                 $chunk = Chunk::create([
@@ -54,13 +54,15 @@ class IndexService
                 ]);
 
                 $this->vectorIndexService->upsertChunk(
-                    $chunk->id,
-                    $embedding,
-                    [
+                    siteId: $page->site->id,
+                    chunkId: $chunk->id,
+                    embedding: $embedding,
+                    payload: [
                         'site_id'  => $chunk->site_id,
                         'page_id'  => $chunk->page_id,
                         'priority' => $priority,
-                    ]
+                    ],
+                    collection: "chunks_{$chunk->site_id}"
                 );
             }
 
@@ -113,7 +115,7 @@ class IndexService
             $sectionTitle = trim($section['title'] ?? '');
             $content      = trim($section['content'] ?? '');
 
-            if (mb_strlen($content) < 100) continue;
+            //if (mb_strlen($content) < 100) continue; //Elle empêche l’indexation des petites sections.
 
             $contextHeader = implode("\n", array_filter([
                 $page->title ? "Page: {$page->title}" : null,
@@ -137,7 +139,7 @@ class IndexService
     protected function buildChunksFromRawText(Page $page): array
     {
         $text = trim($page->content);
-        if (mb_strlen($text) < 300) return [];
+        //if (mb_strlen($text) < 300) return []; //Sinon les petites pages ne sont jamais indexées.
 
         $header = implode("\n", array_filter([
             $page->title ? "Page: {$page->title}" : null,
@@ -158,6 +160,9 @@ class IndexService
     protected function chunkBySentences(string $text, int $maxChars, int $overlapChars): array
     {
         $sentences = preg_split('/(?<=[.!?])\s+/', $text);
+        if (!$sentences || count($sentences) === 0) {
+            return [trim($text)];
+        }
         $chunks    = [];
         $buffer    = '';
 
@@ -170,7 +175,7 @@ class IndexService
             }
         }
 
-        if (mb_strlen($buffer) > 200) {
+        if (mb_strlen($buffer) > 0) {
             $chunks[] = trim($buffer);
         }
 
@@ -235,10 +240,10 @@ class IndexService
         // 1️⃣ Extraction du texte
         $text = $this->extractTextFromDocument($document->path, $document->extension);
 
-        if (mb_strlen($text) < 50) {
+        /*if (mb_strlen($text) < 50) {
             Log::info("Document trop court, ignoré: {$document->path}");
             return;
-        }
+        }*/
 
         DB::beginTransaction();
 
@@ -264,6 +269,7 @@ class IndexService
                 }
 
                 try {
+                    if (trim($textChunk) === '') continue;
                     $embedding = $this->embeddingService->getEmbedding($textChunk);
                 } catch (\Throwable $e) {
                     Log::warning("Embedding échoué pour document {$document->id}", [
@@ -284,15 +290,18 @@ class IndexService
                 ]);
 
                 $this->vectorIndexService->upsertChunk(
-                    $chunk->id,
-                    $embedding,
-                    array_merge([
+                    siteId: $siteId,
+                    chunkId: $chunk->id,
+                    embedding: $embedding,
+                    payload: array_merge([
                         'site_id'     => $chunk->site_id,
                         'page_id'     => $chunk->page_id,
                         'document_id' => $chunk->document_id,
                         'source_type' => $chunk->source_type,
                         'priority'    => $chunk->priority,
-                    ], $metadata)
+                        'metadata'    => $metadata
+                    ]),
+                    collection: "chunks_{$chunk->site_id}"
                 );
             }
 
@@ -323,6 +332,18 @@ class IndexService
         int $overlapChars
     ): array {
         $sentences = preg_split('/(?<=[.!?])\s+/', trim($text));
+        if (!$sentences || count($sentences) === 0) {
+            return [[
+                'text' => trim($text),
+                'priority' => 50,
+                'metadata' => [
+                    'document_name' => $documentName,
+                    'document_id'   => $documentId,
+                    'site_id'       => $siteId,
+                    'chunk_index'   => 0,
+                ],
+            ]];
+        }
         $chunks = [];
         $buffer = '';
         $chunkIndex = 0;
@@ -349,7 +370,7 @@ class IndexService
             }
         }
 
-        if (mb_strlen(trim($buffer)) > 50) {
+        if (mb_strlen(trim($buffer)) > 0) {
             $chunks[] = [
                 'text' => trim($buffer),
                 'priority' => 50 + $chunkIndex,
@@ -521,6 +542,7 @@ class IndexService
                         if ($this->chunkAlreadyExistsForDocument($document, $aliasText)) continue;
 
                         try {
+                            if (trim($aliasText) === '') continue;
                             $embedding = $this->embeddingService->getEmbedding($aliasText);
                         } catch (\Throwable $e) {
                             Log::warning("Embedding échoué pour chunk produit", [
@@ -549,15 +571,17 @@ class IndexService
 
                         if ($chunk) {
                             $this->vectorIndexService->upsertChunk(
-                                $chunk->id,
-                                $embedding,
-                                [
+                                siteId: $document->documentable->id,
+                                chunkId: $chunk->id,
+                                embedding: $embedding,
+                                payload: [
                                     'site_id'     => $chunk->site_id,
                                     'page_id'     => $chunk->page_id,
                                     'document_id' => $chunk->document_id,
                                     'source_type' => $chunk->source_type,
                                     'priority'    => $chunk->priority,
-                                ]
+                                ],
+                                collection: "chunks_{$chunk->site_id}"
                             );
                         }
                     }
@@ -567,6 +591,7 @@ class IndexService
             // 🔹 3️⃣ Création des chunks globaux
             foreach ($chunksToCreate as $chunkData) {
                 try {
+                    if (trim($chunkData['text']) === '') continue;
                     $embedding = $this->embeddingService->getEmbedding($chunkData['text']);
                 } catch (\Throwable $e) {
                     Log::warning("Embedding échoué pour chunk global produit", [
@@ -588,15 +613,17 @@ class IndexService
 
                 if ($chunk) {
                     $this->vectorIndexService->upsertChunk(
-                        $chunk->id,
-                        $embedding,
-                        [
+                        siteId: $document->documentable->id,
+                        chunkId: $chunk->id,
+                        embedding: $embedding,
+                        payload: [
                             'site_id'     => $chunk->site_id,
                             'page_id'     => $chunk->page_id,
                             'document_id' => $chunk->document_id,
                             'source_type' => $chunk->source_type,
                             'priority'    => $chunk->priority,
-                        ]
+                        ],
+                        collection: "chunks_{$chunk->site_id}"
                     );
                 }
             }
@@ -660,4 +687,3 @@ class IndexService
     }
 
 }
-

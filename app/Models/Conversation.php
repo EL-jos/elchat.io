@@ -16,6 +16,10 @@ class Conversation extends BaseModel
     {
         return $this->belongsTo(User::class);
     }
+    public function visitor()
+    {
+        return $this->belongsTo(Visitor::class);
+    }
     public function messages(): HasMany
     {
         return $this->hasMany(Message::class);

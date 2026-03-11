@@ -30,7 +30,40 @@ class RecrawlSinglePageJob implements ShouldQueue
 
         $oldPage = Page::findOrFail($this->pageId);
         $site = $oldPage->site;
-        $url = $oldPage->url;
+
+        if ($oldPage->source === "manual"){
+
+            $manualContent = $oldPage;
+
+            $isUpdate = $manualContent->update([
+                "is_indexed" => false
+            ]);
+
+            if($isUpdate){
+
+                $indexService->indexPage($manualContent, [
+                    'source'  => 'recrawl',
+                    'site_id' => $site->id,
+                ]);
+
+                Log::info("Recrawl completed", [
+                    'site_id' => $site->id,
+                    'page_id' => $manualContent->id,
+                ]);
+
+                // 🔄 On passe en ready immédiatement
+                $site->update([
+                    'status' => 'ready'
+                ]);
+            }else{
+                Log::warning("Recrawl failed — page not updated", [
+                    'id' => $oldPage->id,
+                    'site_id' => $site->id
+                ]);
+            }
+
+            return;
+        }
 
         DB::beginTransaction();
 
@@ -69,6 +102,7 @@ class RecrawlSinglePageJob implements ShouldQueue
         | 3️⃣ Re-crawl (même moteur que sitemap / crawl URL)
         |--------------------------------------------------------------------------
         */
+        $url = $oldPage->url;
         $newPage = $crawlService->crawlSinglePage(
             $site,
             $url,

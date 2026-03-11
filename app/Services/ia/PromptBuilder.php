@@ -3,7 +3,9 @@
 namespace App\Services\ia;
 
 use App\Models\AIRole;
+use App\Models\Conversation;
 use App\Models\Site;
+use Illuminate\Support\Facades\DB;
 
 class PromptBuilder
 {
@@ -14,10 +16,11 @@ class PromptBuilder
         Site $site,
         string $question,
         string $context,
-        array $history = []
+        array $history = [],
+        ?Conversation $conversation = null // Nouveau paramètre
     ): array {
         return [
-            'system' => $this->buildSystemPrompt($site),
+            'system' => $this->buildSystemPrompt($site, $conversation),
             'messages' => array_merge(
                 $this->buildHistory($history),
                 [
@@ -32,7 +35,7 @@ class PromptBuilder
     /**
      * Prompt système complet
      */
-    protected function buildSystemPrompt(Site $site): string
+    protected function buildSystemPrompt(Site $site, ?Conversation $conversation = null): string
     {
         $blocks = [];
 
@@ -60,6 +63,16 @@ class PromptBuilder
         2. Le cadre métier limite strictement ce que tu peux dire.
         3. Le comportement définit COMMENT tu réponds.
         4. Les informations internes sont la SEULE source factuelle.
+
+        OBLIGATION MÉMOIRE :
+        Avant de répondre, analyse la mémoire structurée.
+        Si une préférence, contrainte ou décision existe et est liée à la question actuelle :
+        - Elle doit être appliquée.
+        - Elle ne peut pas être contredite.
+        - Elle doit être rappelée implicitement dans la réponse.
+
+        Si aucune préférence pertinente n'existe, alors seulement tu peux proposer des alternatives.
+        Si la question est ambiguë, utilise en priorité les préférences déjà enregistrées pour interpréter l’intention.
         RULE;
 
         // 3️⃣ Cadre métier du site
@@ -71,6 +84,26 @@ class PromptBuilder
         $role = $site->settings?->aiRole ?? AIRole::default()->first();
         if ($role?->prompt) {
             $blocks[] = "COMPORTEMENT ATTENDU :\n" . $role->prompt;
+        }
+
+        /*// Après le comportement attendu
+        if (!empty($conversation->summary)) {
+            $blocks[] = "MÉMOIRE DE LA CONVERSATION :\n" . $conversation->summary;
+        }*/
+
+        if ($conversation) {
+
+            $memory = DB::table('conversation_memories')
+                ->where('conversation_id', $conversation->id)
+                ->value('memory');
+
+            if ($memory) {
+                $blocks[] = "MÉMOIRE STRUCTURÉE (PRIORITAIRE):\n" . json_encode(json_decode($memory, true), JSON_PRETTY_PRINT);
+            }
+
+            if (!empty($conversation->summary)) {
+                $blocks[] = "RÉSUMÉ CONTEXTUEL (INFORMATIF) :\n" . $conversation->summary;
+            }
         }
 
         return implode("\n\n==============================\n\n", $blocks);

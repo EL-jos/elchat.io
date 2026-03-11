@@ -26,7 +26,7 @@ class SitemapController extends Controller
             $files = $request->file('sitemap_file');
             $sitemap = $this->saveDocument($files, $site, 'file');
         }
-
+        
         ProcessSitemapJob::dispatch(
             siteId: $site->id,
             sitemapDocumentId: $sitemap->id
