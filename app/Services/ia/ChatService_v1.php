@@ -76,9 +76,9 @@ class ChatService
         // 1️⃣ Récupération historique court
         // ─────────────────────────────
         $history = Message::where('conversation_id', $conversation->id)
-            ->orderBy('created_at',)
+            ->orderBy('created_at')
             //->skip(1)
-            ->take(6)
+            ->take(3)
             ->get()
             ->reverse()
             ->map(function ($m) {
@@ -217,9 +217,7 @@ class ChatService
         // ─────────────────────────────
         // 6️⃣ Ranking métier
         // ─────────────────────────────
-        //$ragContextChunks = $this->diversifyChunks($hydrated, 10);
-        //$ragContextChunks = $this->chunkRankingService->rank($ragContextChunks, floatval($site->settings->min_similarity_score));
-        $ragContextChunks = $this->chunkRankingService->rank($hydrated, floatval($site->settings->min_similarity_score));
+        $ragContextChunks = $this->chunkRankingService->rank($hydrated, 5);
         $isValidContext = $this->contextValidator->validate(
             $ragContextChunks,
             $queryPlan
@@ -289,8 +287,6 @@ class ChatService
             history: $history,
             conversation: $conversation
         );
-
-        Log::info("Prompt Payload:", $promptPayload);
 
         // ─────────────────────────────
         // 9️⃣ Appel LLM
@@ -457,7 +453,6 @@ class ChatService
         }
         return $this->normalizeText($normalized);
     }
-
     public function updateConversationSummary(Conversation $conversation): void
     {
         $oldSummary = $conversation->summary ?? '{}';
@@ -471,61 +466,35 @@ class ChatService
             ->implode("\n");
 
         $prompt = <<<PROMPT
-        Tu es un moteur de mémoire conversationnelle utilisé dans un chatbot SaaS multi-domaines
-        (e-commerce, support client, blog, SaaS, etc.).
+        Tu es un moteur de mémoire conversationnelle.
 
-        Ton rôle est de maintenir un résumé court et utile d'une conversation.
+        Ta tâche :
+        Mettre à jour le résumé existant d'une conversation.
 
-        OBJECTIF
-        Mettre à jour le résumé existant avec les nouvelles informations pertinentes.
+        Règles :
+        - Garde uniquement les informations persistantes importantes
+        - Préférences utilisateur
+        - Contraintes
+        - Objectifs
+        - Décisions validées
+        - Informations personnelles utiles au contexte
 
-        RÈGLES IMPORTANTES
+        Ne garde PAS :
+        - Les formules de politesse
+        - Les réponses marketing
+        - Les détails temporaires
+        - Les reformulations
 
-        - Conserve uniquement les informations durables et utiles au contexte.
-        - N'invente jamais d'information.
-        - N'interprète pas les intentions non exprimées.
-        - Supprime les informations temporaires ou inutiles.
-        - Fusionne les informations similaires pour éviter les répétitions.
-        - Si une nouvelle information contredit une ancienne, garde la plus récente.
-
-        INFORMATIONS À CONSERVER
-
-        - préférences utilisateur
-        - objectifs utilisateur
-        - contraintes
-        - décisions confirmées
-        - informations personnelles utiles
-
-        INFORMATIONS À IGNORER
-
-        - salutations
-        - formules de politesse
-        - small talk
-        - réponses marketing
-        - détails temporaires
-
-        FORMAT DU RÉSUMÉ
-
-        - phrases courtes
-        - style neutre
-        - maximum 12 lignes
-        - une information par ligne
-
-        RÉSUMÉ ACTUEL
+        Résumé actuel :
         {$oldSummary}
 
-        NOUVEAUX MESSAGES
+        Nouveaux messages :
         {$recentMessages}
 
-        INSTRUCTION FINALE
-
-        Génère le nouveau résumé mis à jour en respectant les règles ci-dessus.
-
-        Retourne uniquement le résumé.
-        Aucun texte explicatif.
+        Retourne uniquement le nouveau résumé mis à jour.
         PROMPT;
 
-        $response = $this->callLLMForSummary($prompt, $conversation, false);
+        $response = $this->callLLMForSummary($prompt, $conversation);
 
         $conversation->update([
             'summary' => $response,
@@ -543,40 +512,32 @@ class ChatService
             );
         }
     }
-    private function callLLMForSummary(string $prompt, ?Conversation $conversation, bool $return_json = true): string
+    private function callLLMForSummary(string $prompt, ?Conversation $conversation): string
     {
         $maxRetries = 5;
         $delaySeconds = 1; // base backoff
         $conversationId = $conversation?->id ?? 'unknown';
 
-        $fallback = $return_json
-            ? json_encode(['preferences'=>[],'objectives'=>[],'constraints'=>[],'decisions'=>[],'user_info'=>[]])
-            : ($conversation?->summary ?? 'Résumé indisponible');
-
         for ($attempt = 1; $attempt <= $maxRetries; $attempt++) {
-
             try {
-
                 Log::info("Appel à l'API LLM pour résumé (tentative {$attempt})", ['conversation_id' => $conversationId]);
 
                 $response = Http::withHeaders([
                     'Authorization' => 'Bearer ' . env('OPENROUTER_API_KEY'),
                     'Content-Type' => 'application/json',
-                ])->timeout(30)
-                    ->post('https://openrouter.ai/api/v1/chat/completions', [
-                        'model' => 'meta-llama/llama-3.1-8b-instruct',
-                        'messages' => [
-                            ['role' => 'system', 'content' => $prompt]
-                        ],
-                        'temperature' => 0.3,
-                        'max_tokens' => 300,
-                    ]);
+                ])->post('https://openrouter.ai/api/v1/chat/completions', [
+                    'model' => 'meta-llama/llama-3.1-8b-instruct',
+                    'messages' => [
+                        ['role' => 'system', 'content' => $prompt]
+                    ],
+                    'temperature' => 0.3,
+                    'max_tokens' => 300,
+                ]);
 
                 if (!$response->successful()) {
-                    Log::warning("Erreur HTTP API LLM (tentative {$attempt}): {$response->status()}", [
-                        'body' => $response->body(),
-                        'conversation_id' => $conversationId
-                    ]);
+                    $status = $response->status();
+                    $body = $response->body();
+                    Log::warning("Erreur HTTP API LLM (tentative {$attempt}): {$status}", ['body' => $body]);
                     if ($attempt < $maxRetries) {
                         sleep($delaySeconds);
                         $delaySeconds *= 2;
@@ -586,37 +547,25 @@ class ChatService
                 }
 
                 $data = $response->json();
-                $content = data_get($data, 'choices.0.message.content', null);
 
-                if (empty($content)) {
-                    Log::warning("Réponse vide ou malformée (tentative {$attempt})", [
-                        'response_data' => $data,
-                        'conversation_id' => $conversationId
-                    ]);
-                    if ($attempt < $maxRetries) {
-                        sleep($delaySeconds);
-                        $delaySeconds *= 2;
-                        continue;
-                    }
-                }else {
-                    $content = trim($content);
+                if (isset($data['choices'][0]['message']['content'])) {
+                    $content = $data['choices'][0]['message']['content'];
 
-                    if (!$return_json) {
-                        // nettoyage markdown ```json ou ``` si string brut
-                        $content = preg_replace('/^```[a-z]*|```$/mi', '', $content);
-                        $content = trim($content);
-                        Log::info("Résumé LLM reçu (string) avec succès (tentative {$attempt})", ['conversation_id' => $conversationId]);
-                        return $content;
-                    }
-
-                    // Cas JSON attendu
+                    // Vérifier que c'est un JSON valide
                     $decoded = json_decode($content, true);
                     if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
-                        Log::info("Résumé LLM reçu (JSON) avec succès (tentative {$attempt})", ['conversation_id' => $conversationId]);
+                        Log::info("Réponse JSON valide reçue (tentative {$attempt})", ['conversation_id' => $conversationId]);
                         return $content;
+                    } else {
+                        Log::warning("JSON invalide reçu (tentative {$attempt})", ['content' => $content]);
+                        if ($attempt < $maxRetries) {
+                            sleep($delaySeconds);
+                            $delaySeconds *= 2;
+                            continue;
+                        }
                     }
-
-                    Log::warning("JSON invalide reçu (tentative {$attempt})", ['content' => $content]);
+                } else {
+                    Log::warning("Structure de réponse API LLM invalide (tentative {$attempt})", ['response_data' => $data]);
                     if ($attempt < $maxRetries) {
                         sleep($delaySeconds);
                         $delaySeconds *= 2;
@@ -624,122 +573,65 @@ class ChatService
                     }
                 }
 
-            } catch (Exception $e) {
-                Log::error("Exception lors de l'appel API LLM (tentative {$attempt}): " . $e->getMessage(), ['conversation_id' => $conversationId]);
+            } catch (\Exception $e) {
+                Log::error("Erreur inattendue lors de l'appel API pour résumé (tentative {$attempt}): " . $e->getMessage());
                 if ($attempt < $maxRetries) {
                     sleep($delaySeconds);
                     $delaySeconds *= 2;
                     continue;
                 }
             }
-
         }
 
-        Log::error("Échec de l'appel API LLM après {$maxRetries} tentatives, fallback utilisé", ['conversation_id' => $conversationId]);
-        return $fallback;
+        Log::error("Échec de l'appel API LLM pour résumé après {$maxRetries} tentatives", ['conversation_id' => $conversationId]);
 
+        // fallback JSON vide pour éviter erreur côté extraction
+        return json_encode([
+            'preferences' => [],
+            'objectives' => [],
+            'constraints' => [],
+            'decisions' => [],
+            'user_info' => []
+        ]);
     }
     public function extractStructuredMemory(Conversation $conversation): array
     {
-        $summary = $conversation->summary ?? '';
+        $summary = $conversation->summary ?? '{}';
 
-        if ($summary === '' || $summary === 'Résumé indisponible') {
+        if (empty($summary)) {
             return [];
         }
 
         $prompt = <<<PROMPT
-        Tu es un moteur d'extraction de mémoire structurée utilisé dans un chatbot SaaS multi-domaines
-        (blog, e-commerce, support client, SaaS, etc.).
+        Tu es un moteur d'extraction de mémoire structurée à partir d'un résumé de conversation.
 
-        Ton rôle :
-        Transformer un résumé de conversation en JSON structuré exploitable par un agent conversationnel.
+        Ta tâche :
+        - Transforme le résumé suivant en JSON structuré avec les clés suivantes :
+            - preferences : liste des préférences exprimées par l'utilisateur
+            - objectives : liste des objectifs de l'utilisateur
+            - constraints : liste des contraintes exprimées
+            - decisions : liste des décisions déjà prises ou validées
+            - user_info : informations personnelles utiles (nom, localisation, email, etc.)
 
-        Règles importantes :
-
-        - Extrais uniquement les informations explicitement présentes dans le résumé.
-        - Tu peux reformuler légèrement pour rendre l'information exploitable.
-        - N'invente jamais d'information absente.
-        - Fusionne les informations identiques pour éviter les doublons.
-        - Si une information contredit une autre plus ancienne, garde la plus récente.
-        - Les éléments doivent être courts (2 à 8 mots).
-        - Maximum 15 éléments par catégorie.
-        - Si aucune information pertinente n'est trouvée pour une catégorie, retourne un tableau vide.
-
-        Catégories et exemples :
-
-        preferences : produits, services, choix ou intérêts exprimés.
-        Exemples :
-        "stylo noir"
-        "ordinateur Apple"
-        "coffret cadeau"
-
-        objectives : ce que l'utilisateur souhaite faire ou obtenir.
-        Exemples :
-        "acheter un stylo"
-        "contacter le support"
-        "obtenir des informations"
-
-        constraints : conditions ou limitations exprimées.
-        Exemples :
-        "budget limité"
-        "livraison rapide"
-        "couleur noire"
-
-        decisions : décisions déjà prises ou validées.
-        Exemples :
-        "choisir offre premium"
-        "prendre ce modèle"
-
-        user_info : informations personnelles explicitement mentionnées.
-        Exemples :
-        "vit à Paris"
-        "photographe"
-        "email exemple@mail.com"
-
-        Format STRICT :
-
+        Voici le format exact attendu (remplis avec les informations pertinentes du résumé) :
         {
-          "preferences": [],
-          "objectives": [],
-          "constraints": [],
-          "decisions": [],
-          "user_info": []
+            "preferences": [...],
+            "objectives": [...],
+            "constraints": [...],
+            "decisions": [...],
+            "user_info": [...]
         }
 
-        Résumé à traiter :
+        Résumé :
         {$summary}
 
-        ⚠️ Réponds uniquement avec un JSON valide.
-        Aucun texte avant ou après.
-
-        Exemple 1 :
-
-        Résumé : "l'utilisateur préfère les stylos bleus, souhaite un coffret cadeau pour un ami, a un budget limité, veut contacter le support par email"
-
-        Réponse :
-        {
-          "preferences": ["stylos bleus", "coffret cadeau"],
-          "objectives": ["contacter le support"],
-          "constraints": ["budget limité"],
-          "decisions": [],
-          "user_info": []
-        }
-
-        Exemple 2 :
-
-        Résumé : "l'utilisateur veut un ordinateur Apple pas cher"
-
-        Réponse :
-        {
-          "preferences": ["ordinateur Apple"],
-          "objectives": ["acheter un ordinateur"],
-          "constraints": ["prix bas"],
-          "decisions": [],
-          "user_info": []
-        }
+        ⚠️ Réponds UNIQUEMENT avec un JSON valide.
+        Ne mets aucun texte avant ou après.
+        Ne mets pas d'explication.
+        Respecte exactement la structure et les clés.
         PROMPT;
 
-        $response = $this->callLLMForSummary($prompt, $conversation, true);
+        $response = $this->callLLMForSummary($prompt, $conversation);
 
         Log::info("Extract Structure Memory: ", [
             'response' => $response,
@@ -758,104 +650,35 @@ class ChatService
     public function extractStructuredMemoryFromMessage(Message $message): array
     {
         $prompt = <<<PROMPT
-        Tu es un moteur d'extraction de mémoire structurée utilisé dans un chatbot SaaS multi-domaines
-        (blog, e-commerce, support client, SaaS, etc.).
+        Tu es un moteur d'extraction de mémoire structurée à partir d'un message utilisateur.
 
-        Ton rôle est d'extraire les informations utiles contenues dans le message utilisateur.
+        Ta tâche :
+        - Transforme le message suivant en JSON structuré avec les clés suivantes :
+            - preferences
+            - objectives
+            - constraints
+            - decisions
+            - user_info
 
-        Règles importantes :
-
-        - Extrais uniquement les informations présentes dans le message.
-        - Tu peux reformuler légèrement pour rendre l'information exploitable.
-        - N'invente jamais d'information absente.
-        - Si aucune information pertinente n'est trouvée, retourne des tableaux vides.
-        - Les éléments doivent être courts (2 à 8 mots).
-
-        Catégories :
-
-        preferences
-        Produits, services, choix ou intérêts exprimés.
-
-        Exemples :
-        "stylo noir"
-        "ordinateur Apple"
-        "coffrets cadeaux"
-
-        objectives
-        Ce que l'utilisateur souhaite faire ou obtenir.
-
-        Exemples :
-        "acheter un stylo"
-        "contacter l'entreprise"
-        "obtenir des informations"
-
-        constraints
-        Conditions ou limitations.
-
-        Exemples :
-        "budget limité"
-        "livraison rapide"
-        "couleur noir"
-
-        decisions
-        Décisions déjà prises.
-
-        Exemples :
-        "choisir offre premium"
-        "prendre ce modèle"
-
-        user_info
-        Informations personnelles explicitement mentionnées.
-
-        Exemples :
-        "vit à Paris"
-        "photographe"
-        "travaille en freelance"
-
-        Format STRICT :
-
+        Format exact attendu :
         {
-          "preferences": [],
-          "objectives": [],
-          "constraints": [],
-          "decisions": [],
-          "user_info": []
+            "preferences": [...],
+            "objectives": [...],
+            "constraints": [...],
+            "decisions": [...],
+            "user_info": [...]
         }
 
-        Message utilisateur :
+        Message :
         {$message->content}
 
-        Réponds uniquement avec un JSON valide.
-        Aucun texte avant ou après.
-
-        Exemple 1 :
-
-        Message : "Je veux un ordinateur Apple pas cher"
-
-        Réponse :
-        {
-         "preferences": ["ordinateur Apple"],
-         "objectives": ["acheter un ordinateur"],
-         "constraints": ["prix bas"],
-         "decisions": [],
-         "user_info": []
-        }
-
-        Exemple 2 :
-
-        Message : "Je suis intéressé par vos coffrets"
-
-        Réponse :
-        {
-         "preferences": ["coffrets"],
-         "objectives": ["obtenir des informations"],
-         "constraints": [],
-         "decisions": [],
-         "user_info": []
-        }
+        ⚠️ Réponds UNIQUEMENT avec un JSON valide.
+        Ne mets aucun texte avant ou après.
+        Ne mets pas d'explication.
+        Respecte exactement la structure et les clés.
         PROMPT;
 
-        $response = $this->callLLMForSummary($prompt, $message->conversation, true);
+        $response = $this->callLLMForSummary($prompt, $message->conversation);
 
         Log::info("Extract Structure Memory From Message: ", [
             'response' => $response,
@@ -870,39 +693,5 @@ class ChatService
             'decisions' => [],
             'user_info' => []
         ];
-    }
-
-    private function diversifyChunks(array $chunks, int $limit = 5): array
-    {
-        $selected = [];
-
-        foreach ($chunks as $chunk) {
-
-            $tooSimilar = false;
-
-            foreach ($selected as $s) {
-
-                similar_text(
-                    strtolower($chunk['text']),
-                    strtolower($s['text']),
-                    $percent
-                );
-
-                if ($percent > 70) {
-                    $tooSimilar = true;
-                    break;
-                }
-            }
-
-            if (!$tooSimilar) {
-                $selected[] = $chunk;
-            }
-
-            if (count($selected) >= $limit) {
-                break;
-            }
-        }
-
-        return $selected;
     }
 }

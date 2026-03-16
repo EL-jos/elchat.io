@@ -43,10 +43,7 @@ class AIRoleSeeder extends Seeder
                 - La reformulation doit rester strictement fidèle au sens initial, sans ajout, interprétation ou simplification excessive..
                 - Ne commence pas par une salutation si la conversation est entamée.
                 - Termine par une proposition d’aide naturelle (sans forcer la vente).
-                - SI L’UTILISATEUR MONTRE UN INTÉRÊT POUR UN PRODUIT OU SERVICE OU DEMANDE À CONTACTER / VISITER LE SHOWROOM / ENTREPRISE :
-                    - Propose directement les coordonnées complètes disponibles dans les informations internes 
-                      (adresse, téléphone, WhatsApp, e-mail).
-                    - Ne mentionne rien d’autre, ne reformule pas le produit ou les bénéfices, et ne déduis aucune information.
+                
                 PROMPT,
                 'is_default' => true,
             ],

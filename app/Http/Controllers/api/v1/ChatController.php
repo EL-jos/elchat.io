@@ -4,6 +4,7 @@ namespace App\Http\Controllers\api\v1;
 
 use App\Http\Controllers\Controller;
 use App\Models\Conversation;
+use App\Models\ConversationMemory;
 use App\Models\Message;
 use App\Models\Site;
 use App\Services\ia\ChatService;
@@ -63,7 +64,7 @@ class ChatController extends Controller
                 'visitor_id' => $visitorId,
             ]);
 
-            $isCreated = $this->vectorCreationService->createSiteCollection(
+           /* $isCreated = $this->vectorCreationService->createSiteCollection(
                 siteId: $site->id,
                 collection: "conversations_{$conversation->id}"
             );
@@ -72,7 +73,7 @@ class ChatController extends Controller
                 Log::info("Création de la collection réussit", [
                     'collection' => "conversations_{$conversation->id}",
                 ]);
-            }
+            }*/
         }
 
         // Sauvegarder la question
@@ -87,28 +88,33 @@ class ChatController extends Controller
         // ────────────────
         // 1️⃣ Mémoire structurée
         // ────────────────
-        $messageCount = Message::where('conversation_id', $conversation->id)->count();
+        //$messageCount = Message::where('conversation_id', $conversation->id)->count();
+        $messageCount = $conversation->messages()->count();
+
+        Log::info("Nombre de message", [
+            "MessageCount" => $messageCount,
+            "Conversation Message Count" => $conversation->messages->count()
+        ]);
+
         if ($messageCount === 1) {
             // Premier message => extraction immédiate
             $memory = $this->chatService->extractStructuredMemoryFromMessage($userMessage);
+
+            //dd($memory);
             if (!empty($memory)) {
                 DB::table('conversation_memories')->updateOrInsert(
                     ['conversation_id' => $conversation->id],
                     [
+                        'id' => (string) Str::uuid(),
                         'memory' => json_encode($memory),
                         'updated_at' => now(),
-                        'id' => (string) Str::uuid(),
+                        'created_at' => now(),
                     ]
                 );
             }
-        } elseif ($conversation->messages->count() % 6 === 0) {
-            // ✅ Ici, après l’indexation et avant d’envoyer la réponse
-            // Tous les 6 messages => mise à jour de la mémoire avec résumé
-            $this->chatService->updateConversationSummary($conversation);
-            $this->chatService->updateConversationMemory($conversation); // ✅ mémoire structurée
         }
 
-
+        //dd("On verifie", ConversationMemory::where('conversation_id', $conversation->id)->get());
 
         Log::info("Avant mercure");
 
@@ -130,7 +136,7 @@ class ChatController extends Controller
         );
 
         // Sauvegarder la réponse
-        $botMessage = Message::create([
+        Message::create([
             'id' => (string) Str::uuid(),
             'conversation_id' => $conversation->id,
             'user_id' => $userId,
@@ -144,6 +150,17 @@ class ChatController extends Controller
             'content' => $answer,
             'created_at' => now()->toISOString(),
         ]);
+
+        $messageCount = $conversation->messages()->count(); // Je recalcule
+
+        if ($messageCount % 5 === 0) {
+            // ✅ Ici, après l’indexation et avant d’envoyer la réponse
+            $this->chatService->updateConversationMemory($conversation); // ✅ mémoire structurée
+        }
+
+        if ($messageCount % 8 === 0){
+            $this->chatService->updateConversationSummary($conversation);
+        }
 
 
         return response()->json([

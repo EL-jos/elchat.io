@@ -76,7 +76,7 @@ class ChatService
         // 1️⃣ Récupération historique court
         // ─────────────────────────────
         $history = Message::where('conversation_id', $conversation->id)
-            ->orderBy('created_at',)
+            ->orderBy('created_at', 'desc')
             //->skip(1)
             ->take(6)
             ->get()
@@ -217,9 +217,8 @@ class ChatService
         // ─────────────────────────────
         // 6️⃣ Ranking métier
         // ─────────────────────────────
-        //$ragContextChunks = $this->diversifyChunks($hydrated, 10);
-        //$ragContextChunks = $this->chunkRankingService->rank($ragContextChunks, floatval($site->settings->min_similarity_score));
-        $ragContextChunks = $this->chunkRankingService->rank($hydrated, floatval($site->settings->min_similarity_score));
+        $ragContextChunks = $this->diversifyChunks($hydrated, 10);
+        $ragContextChunks = $this->chunkRankingService->rank($ragContextChunks, floatval($site->settings->min_similarity_score));
         $isValidContext = $this->contextValidator->validate(
             $ragContextChunks,
             $queryPlan
@@ -289,8 +288,6 @@ class ChatService
             history: $history,
             conversation: $conversation
         );
-
-        Log::info("Prompt Payload:", $promptPayload);
 
         // ─────────────────────────────
         // 9️⃣ Appel LLM
