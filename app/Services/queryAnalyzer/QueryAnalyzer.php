@@ -55,8 +55,9 @@ class QueryAnalyzer
 
         Your job is to transform a user question into a structured search plan
         that will be used for vector retrieval.
-
+        =================
         You must analyze:
+        =================
 
         - intent
         - entities
@@ -65,16 +66,24 @@ class QueryAnalyzer
         - filters if needed
         - retrieval strategy
 
+        =====================
         Conversation summary:
+        =====================
+
         {$summary}
 
+        ==============
         User question:
+        ==============
+
         {$question}
 
         Return ONLY valid JSON without any explanation, notes, or markdown code blocks.
         Do NOT include text before or after the JSON. The response must start with { and end with }.
 
+        ============
         JSON schema:
+        ============
 
         {
          "clean_query": "normalized search query",
@@ -91,7 +100,7 @@ class QueryAnalyzer
 
          "entities": [],
 
-         "intent": "information | pricing | support | navigation | comparison",
+         "intent": "information | pricing | comparison | navigation | transactional | support | lead | booking | download",
 
          "query_type": "factual | exploratory | transactional",
 
@@ -104,7 +113,9 @@ class QueryAnalyzer
          "search_strategy": "single | multi_query | decomposition"
         }
 
+        ======
         Rules:
+        ======
 
         - search_queries should improve semantic retrieval
         - use multiple queries if useful
@@ -112,6 +123,20 @@ class QueryAnalyzer
         - extract entities
         - never hallucinate information
         - keep queries concise
+
+        ===================
+        Intent definitions:
+        ===================
+
+        information → general questions about the company, products or content.
+        pricing → price, cost, plans, subscription, fees.
+        comparison → comparing products, plans or services.
+        navigation → asking where something is on the website.
+        transactional → buying, ordering, subscribing.
+        support → technical help or problem solving.
+        lead → requesting contact, demo, quote, meeting.
+        booking → scheduling or reserving something (appointment, demo, meeting, event, consultation).
+        download → requesting a downloadable resource (file, PDF, guide, ebook, whitepaper, software).
         PROMPT;
     }
 

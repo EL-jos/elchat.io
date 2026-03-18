@@ -15,6 +15,7 @@ use App\Http\Controllers\api\v1\TypeSiteController;
 use App\Http\Controllers\api\v1\UserController;
 use App\Http\Controllers\api\v1\WidgetSettingController;
 use App\Http\Controllers\api\v1\WidgetVisitorController;
+use App\Http\Controllers\api\v2\CtaController;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\api\v1\SiteController;
 use App\Http\Controllers\api\v1\AuthController;
@@ -80,6 +81,12 @@ Route::prefix('v1')->group(function () {
             Route::get('/users/site/{site}', 'index')->whereUuid('site');
             Route::get('users/{userId}/site/{site}', 'show')->whereUuid(['userId', 'site']);
         });
+
+        Route::apiResource('site.ctas', CtaController::class);
+        Route::controller(CtaController::class)->group(function () {
+            Route::delete('site/{site}/ctas', 'destroyMultiple');
+        });
+
     });
     Route::controller(SiteController::class)->group(function () {
         Route::get('/site/{site_id}/widget/config', 'widgetConfig');

@@ -47,6 +47,50 @@ class EntityResolver
                 $globalChunk = $allChunks->first(fn($c) => ($c->metadata['type'] ?? null) === 'global');
 
                 if ($globalChunk) {
+                    $raw = $globalChunk->metadata['raw'] ?? [];
+
+                    // 🔄 Fusion des alias chunks, uniquement pour certains champs
+                    $importantFields = ['image_url', 'product_url', 'price', 'discount_price', 'product_name', 'product_reference'];
+
+                    // 🔄 Fusion des alias chunks
+                    foreach ($allChunks as $c) {
+                        $meta = $c->metadata ?? [];
+                        if (($meta['type'] ?? null) === 'statistical_alias') {
+                            $field = $meta['field'] ?? null;
+                            $value = $meta['value'] ?? null;
+
+                            /*Log::info("ENTITY RESOLVER", [
+                                "field" => $field,
+                                "value" => $value,
+                                "raw" => $raw[$field],
+                                "raw global" => $raw,
+                            ]);*/
+
+                            if ($field && $value && empty($raw[$field])) {
+                                $raw[$field] = $value;
+                            }
+                        }
+                    }
+
+                    $resolved->push([
+                        'id' => $globalChunk->id,
+                        'text' => $globalChunk->text,
+                        'source_type' => $globalChunk->source_type,
+                        'metadata' => [
+                            ...$globalChunk->metadata,
+                            'raw' => $raw, // 🔥 raw enrichi avec les champs essentiels seulement
+                        ],
+                        'priority' => $globalChunk->priority,
+                        'vector_score' => $chunk['vector_score'] ?? null,
+                        'final_score' => $chunk['final_score'] ?? null,
+                    ]);
+                } else {
+                    $combinedText = $allChunks->pluck('text')->implode('. ');
+                    $chunk['text'] = $combinedText;
+                    $resolved->push($chunk);
+                }
+
+                /*if ($globalChunk) {
                     $resolved->push([
                         'id' => $globalChunk->id,
                         'text' => $globalChunk->text,
@@ -60,7 +104,7 @@ class EntityResolver
                     $combinedText = $allChunks->pluck('text')->implode('. ');
                     $chunk['text'] = $combinedText;
                     $resolved->push($chunk);
-                }
+                }*/
 
                 continue;
             }
@@ -73,7 +117,7 @@ class EntityResolver
                 if (!$originalChunk) {
                     $resolved->push($chunk);
                     continue;
-                } 
+                }
 
                 // 🔎 Déterminer la clé unique selon le type
                 if (in_array($sourceType, ['document'])) {
@@ -115,6 +159,13 @@ class EntityResolver
 
                 $chunk['text'] = $combinedText;
 
+                // 🔹 Ajoute les métadonnées importantes pour les pages
+                $metadata = $chunk['metadata'] ?? [];
+                $metadata['title'] = $chunk['title'] ?? $originalChunk->title ?? 'Page';
+                $metadata['url'] = $chunk['url'] ?? $originalChunk->url ?? null;
+
+                $chunk['metadata'] = $metadata;
+
                 $resolved->push($chunk);
 
                 continue;
@@ -127,4 +178,3 @@ class EntityResolver
         return $resolved->toArray();
     }
 }
- 

@@ -9,7 +9,16 @@ use App\Models\UnansweredQuestion;
 use App\Models\WidgetSetting;
 use App\Services\chunks\ChunkHydrationService;
 use App\Services\chunks\ChunkRankingService;
+use App\Services\cta\ChatResponse;
+use App\Services\cta\ContextRuleMatcher;
+use App\Services\cta\CTAEngine;
+use App\Services\cta\IntentRuleMatcher;
+use App\Services\cta\KeywordRuleMatcher;
+use App\Services\queryAnalyzer\IntentRouter;
+use App\Services\queryAnalyzer\LeadService;
+use App\Services\queryAnalyzer\NavigationService;
 use App\Services\queryAnalyzer\QueryAnalyzer;
+use App\Services\queryAnalyzer\TransactionService;
 use App\Services\rag\ContextCompressor;
 use App\Services\rag\ContextValidator;
 use App\Services\rag\RetrievalOptimizer;
@@ -26,6 +35,31 @@ class ChatService
 {
 
     use TextNormalizer;
+
+    protected array $handlers = [
+
+        'lead_capture' => LeadService::class,
+        'navigation' => NavigationService::class,
+        'transaction_flow' => TransactionService::class,
+    ];
+
+    private array $entityLabels = [
+        'product' => [
+            'singular' => 'produit',
+            'plural' => 'produits',
+            'priority' => 1,
+        ],
+        'page' => [
+            'singular' => 'page',
+            'plural' => 'pages',
+            'priority' => 2,
+        ],
+        'document' => [
+            'singular' => 'document',
+            'plural' => 'documents',
+            'priority' => 3,
+        ],
+    ];
 
     public function __construct(
         protected EmbeddingService $embeddingService,
@@ -45,14 +79,19 @@ class ChatService
         protected QueryAnalyzer $queryAnalyzer,
         protected RetrievalOptimizer $retrievalOptimizer,
         protected ContextValidator $contextValidator,
-        protected ContextCompressor $contextCompressor
+        protected ContextCompressor $contextCompressor,
+
+        protected IntentRouter $intentRouter,
+        protected CTAEngine $CTAEngine,
+
+        protected EntityExtractor $entityExtractor,
     )
     {}
 
     /**
      * Réponse commerciale incarnée (mode production)
      */
-    public function answer(Site $site, string $question, Conversation $conversation): string
+    public function answer(Site $site, string $question, Conversation $conversation): ChatResponse
     {
 
         /*Log::info('CHAT ANSWER DEBUG', [
@@ -69,7 +108,10 @@ class ChatService
             ->handle($intent, $conversation);
 
         if ($earlyResponse !== null) {
-            return $earlyResponse;
+            return new ChatResponse(
+                message: $earlyResponse,
+                ctas: []
+            );
         }
 
         // ─────────────────────────────
@@ -103,37 +145,49 @@ class ChatService
         $preparedQuestion = $this->prepareQuestion($question, $conversation);
 
         $queryPlan = $this->queryAnalyzer->analyze($preparedQuestion, $conversation);
-        Log::info("Query Plan Prepare", [
+        /*Log::info("Query Plan Prepare", [
             "original_question" => $question,
             "prepared_question" => $preparedQuestion,
             "queryPlan" => $queryPlan,
-        ]);
+        ]);*/
+
+        /*$route = $this->intentRouter->route($queryPlan, $site);
+        if (isset($this->handlers[$route])) {
+
+            $handler = app($this->handlers[$route]);
+
+            return $handler->handle($question, $site, $conversation);
+        }
+
+        $topK = match($queryPlan->intent) {
+            'pricing' => 5,
+            'comparison' => 12,
+            'information' => 8,
+            default => 6
+        };*/
 
         $query = $queryPlan->cleanQuery;
-        Log::info("QueryPlan", [
+        /*Log::info("QueryPlan", [
             "clean_query" => $queryPlan->cleanQuery,
             "strategy" => $queryPlan->searchStrategy,
             "queries" => $queryPlan->searchQueries,
             "sub_queries" => $queryPlan->subQueries,
             "top_k" => $queryPlan->topK
-        ]);
+        ]);*/
         $queries = null;
         switch ($queryPlan->searchStrategy) {
-
             case 'decomposition':
                 $queries = $queryPlan->subQueries ?: [$queryPlan->cleanQuery];
                 break;
-
             case 'multi_query':
                 $queries = $queryPlan->searchQueries ?: [$queryPlan->cleanQuery];
                 break;
-
             default:
                 $queries = [$queryPlan->cleanQuery];
         }
-        Log::info("Queries", [
+        /*Log::info("Queries", [
             "queries" => $queries,
-        ]);
+        ]);*/
 
         // ─────────────────────────────
         // 2️⃣ Embedding
@@ -147,7 +201,7 @@ class ChatService
             $partial = $this->vectorSearchService->search(
                 embedding: $embedding,
                 siteId: $site->id,
-                limit: $queryPlan->topK,
+                limit: $topK ?? $queryPlan->topK,
                 scoreThreshold: floatval($site->settings->min_similarity_score),
                 collection: "chunks_{$site->id}"
             );
@@ -202,8 +256,11 @@ class ChatService
             ]);
 
             //dd(empty($qdrantResults), $qdrantResults, $site->id, floatval($site->settings->min_similarity_score));
-            return "Je n’ai pas trouvé cette information dans les données de notre entreprise.
-            N’hésitez pas à nous préciser votre besoin ou à nous contacter directement.";
+            return new ChatResponse(
+                message: "Je n’ai pas trouvé cette information dans les données de notre entreprise.
+            N’hésitez pas à nous préciser votre besoin ou à nous contacter directement.",
+                ctas: []
+            );
         }
 
         // ─────────────────────────────
@@ -213,7 +270,7 @@ class ChatService
         $hydrated = $this->chunkHydrationService->hydrate($results);
         Log::info("Hydrated Chunks :", $hydrated);
         $hydratedMessages = $this->chunkHydrationService->hydrateMessages($historyMessagesResults);
-        Log::info("Hydrated Messages :", $hydratedMessages);
+        //Log::info("Hydrated Messages :", $hydratedMessages);
         // ─────────────────────────────
         // 6️⃣ Ranking métier
         // ─────────────────────────────
@@ -236,10 +293,17 @@ class ChatService
                 'question' => $question,
             ]);
 
-            return "Je ne trouve pas d'information fiable sur ce sujet dans les données disponibles.";
+            return new ChatResponse(
+                message: "Je ne trouve pas d'information fiable sur ce sujet dans les données disponibles.",
+                ctas: []
+            );
         }
-        Log::info("RAG Context Chunks :", $ragContextChunks);
+        //Log::info("RAG Context Chunks :", $ragContextChunks);
         $ragContextChunks = $this->entityResolver->resolve(collect($ragContextChunks));
+        $entities = $this->entityExtractor->extract($ragContextChunks);
+        Log::info("ENTITIES RECUPERER: ", [
+            "entities" => $entities
+        ]);
         //Log::info("***RAG Context Chunks With RESOLVE: ", $ragContextChunks);
         $ragContextMessages = collect($hydratedMessages)->sortByDesc('vector_score')->take(5)->toArray();
 
@@ -269,18 +333,21 @@ class ChatService
         Log::info("Compressed Context:", ['context' => $context]);
 
         if (trim($context) === '') {
-            return "Je n’ai pas d’information fiable à ce sujet pour le moment.";
+            return new ChatResponse(
+                message: "Je n’ai pas d’information fiable à ce sujet pour le moment.",
+                ctas: []
+            );
         }
 
         // ─────────────────────────────
         // 8️⃣ Construction Prompt
         // ─────────────────────────────
-        Log::info("DONNES POUR PROMPT BUILDER", [
+        /*Log::info("DONNES POUR PROMPT BUILDER", [
             'site' => $site->id,
             'question' => $question,
             'context' => $context,
             'history' => $history,
-        ]);
+        ]);*/
 
         $promptPayload = $this->promptBuilder->build(
             site: $site,
@@ -290,7 +357,14 @@ class ChatService
             conversation: $conversation
         );
 
-        Log::info("Prompt Payload:", $promptPayload);
+        //Log::info("Prompt Payload:", $promptPayload);
+
+        // ─────────────────────────────
+        // 8.5️⃣ Résolution CTA
+        // ─────────────────────────────
+        $ctas = $this->CTAEngine->resolve($site, $queryPlan, $conversation);
+        Log::info("Resolved CTAs:", ['ctas' => $ctas]);
+
 
         // ─────────────────────────────
         // 9️⃣ Appel LLM
@@ -304,7 +378,37 @@ class ChatService
         // ─────────────────────────────
         // 🔟 Response Guard (anti-boucle)
         // ─────────────────────────────
-        return $this->responseGuard->validate($response, $conversation);
+        $validatedResponse = $this->responseGuard->validate($response, $conversation);
+
+        Log::info("REPONSE AVEC CTA OU PAS et ENTITIES OU PAS", [
+            "content" => $validatedResponse,
+            "ctas" => $ctas,
+            "entities" => $entities,
+        ]);
+
+        // Si réponse vide / non disponible mais entities présentes
+        if (
+            $validatedResponse ===  "Cette information n’est pas disponible dans nos documents internes."
+            &&
+            !empty($entities)
+        ) {
+            // Ajoute un texte introductif pour contextualiser les entities
+            $fallbackMessage = $this->buildEntitiesFallbackMessage($entities);
+
+            if ($fallbackMessage) {
+                $validatedResponse = $fallbackMessage;
+            }
+        } elseif (!empty($entities)) {
+
+            $validatedResponse .= "\n\n---\n\n💡 **Ressources utiles :**";
+        }
+
+        // Retour final avec CTAs
+        return new ChatResponse(
+            message: $validatedResponse,
+            ctas: $ctas,
+            entities: $entities
+        );
     }
     /**
      * Appel LLM avec PERSONA EMPLOYÉ INTERNE
@@ -904,5 +1008,51 @@ class ChatService
         }
 
         return $selected;
+    }
+
+    private function buildEntitiesFallbackMessage(array $entities): ?string
+    {
+        if (empty($entities)) {
+            return null;
+        }
+
+        // 🔢 Compter les types
+        $counts = collect($entities)
+            ->groupBy('type')
+            ->map(fn($items) => count($items));
+
+        // 🎯 Construire les labels avec count
+        $parts = collect($counts)
+            ->filter(fn($count, $type) => isset($this->entityLabels[$type]))
+            ->sortBy(fn($count, $type) => $this->entityLabels[$type]['priority'])
+            ->map(function ($count, $type) {
+
+                $config = $this->entityLabels[$type];
+
+                $label = $count === 1
+                    ? $config['singular']
+                    : $config['plural'];
+
+                return "{$count} {$label}";
+            })
+            ->values()
+            ->toArray();
+
+        if (empty($parts)) {
+            return null;
+        }
+
+        // 🧠 Phrase naturelle
+        if (count($parts) === 1) {
+            $list = $parts[0];
+        } elseif (count($parts) === 2) {
+            $list = implode(' et ', $parts);
+        } else {
+            $last = array_pop($parts);
+            $list = implode(', ', $parts) . ' et ' . $last;
+        }
+
+        // ✨ Markdown propre
+        return "Nous n’avons pas cette information exacte.\n\n---\n\n💡 **Voici {$list} qui pourraient vous être utiles :**";
     }
 }

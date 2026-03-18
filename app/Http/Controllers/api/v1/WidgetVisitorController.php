@@ -120,7 +120,7 @@ class WidgetVisitorController extends Controller
         $conversation = Conversation::where('id', $conversationId)
             ->where('visitor_id', $visitor->id)
             ->where('site_id', $site->id)
-            ->with('messages')
+            ->with(['messages', 'messages.displayedCtas'])
             ->firstOrFail();
 
         return response()->json($conversation);
@@ -140,7 +140,7 @@ class WidgetVisitorController extends Controller
             ->where('site_id', $site->id)
             ->firstOrFail();
 
-        $conversations = Conversation::with('messages')
+        $conversations = Conversation::with(['messages', 'messages.displayedCtas'])
             ->where('site_id', $site->id)
             ->where('visitor_id', $visitor->id)
             ->get();

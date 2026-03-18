@@ -157,7 +157,7 @@ class VectorSearchService
             return [];
         }
     }
-    
+
     protected function http()
     {
         return Http::timeout(10)

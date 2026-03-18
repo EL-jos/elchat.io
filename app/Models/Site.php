@@ -51,4 +51,9 @@ class Site extends BaseModel
     public function knowledgeQualityScore(){
         return $this->hasOne(KnowledgeQualityScore::class);
     }
+    public function ctas(): HasMany
+    {
+        return $this->hasMany(ChatbotCta::class, 'site_id', 'id')
+            ->orderBy('position');
+    }
 }

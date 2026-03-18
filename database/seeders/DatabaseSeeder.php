@@ -30,6 +30,7 @@ class DatabaseSeeder extends Seeder
         $this->call([
             //UserSeed::class,
             AIRoleSeeder::class,
+            ChatbotCtaSeeder::class
         ]);
     }
 }

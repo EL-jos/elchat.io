@@ -70,7 +70,7 @@ class ChunkHydrationService
                 'text_length' => strlen($textContent),
                 'text_preview' => substr($textContent, 0, 50),
                 'text' => $textContent,
-            ]);*/ 
+            ]);*/
         }
 
         return $hydrated;

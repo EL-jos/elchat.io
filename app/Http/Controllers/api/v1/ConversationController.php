@@ -73,7 +73,7 @@ class ConversationController extends Controller
         $conversation = Conversation::where('id', $conversationId)
                         ->where('user_id', auth()->id())
                         ->where('site_id', $siteId)
-                        ->with('messages')
+                        ->with(['messages', 'messages.displayedCtas'])
                         ->first();
 
         return response()->json($conversation);
@@ -83,7 +83,7 @@ class ConversationController extends Controller
         $conversation = Conversation::where('id', $conversationId)
             ->where('user_id', $userId)
             ->where('site_id', $siteId)
-            ->with('messages')
+            ->with(['messages', 'messages.displayedCtas'])
             ->first();
 
         //dd($conversation);

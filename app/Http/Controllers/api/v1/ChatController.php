@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Conversation;
 use App\Models\ConversationMemory;
 use App\Models\Message;
+use App\Models\MessageCTA;
 use App\Models\Site;
 use App\Services\ia\ChatService;
 use App\Services\ia\EmbeddingService;
@@ -129,25 +130,57 @@ class ChatController extends Controller
 
 
         // Générer la réponse (🧠 avec mémoire)
-        $answer = $this->chatService->answer(
+        $chatResponse = $this->chatService->answer(
             site: $site,
             question: $data['question'],
             conversation: $conversation
         );
 
         // Sauvegarder la réponse
-        Message::create([
+        /**
+         * @var Message $botMessage
+         */
+        $botMessage = Message::create([
             'id' => (string) Str::uuid(),
             'conversation_id' => $conversation->id,
             'user_id' => $userId,
             'role' => 'bot',
-            'content' => $answer,
+            'content' => $chatResponse->message, // texte LLM uniquement
+            'entities' => $chatResponse->entities,
         ]);
+
+        Log::info("LES CTA'S", [
+            "ctas" => $chatResponse->ctas
+        ]);
+
+        Log::info("LES ENTITIES", [
+            "ctas" => $chatResponse->entities
+        ]);
+
+        foreach ($chatResponse->ctas as $index => $cta) {
+
+            MessageCta::create([
+                'id' => (string) Str::uuid(),
+                'message_id' => $botMessage->id,
+                'cta_id' => $cta['id'],
+                'position' => $index,
+
+                // snapshot
+                'label' => $cta['label'],
+                'action' => $cta['action'],
+                'value' => $cta['value'] ?? null,
+                'style' => $cta['style'] ?? null,
+            ]);
+
+        }
+
 
         $this->mercureService->post($topic, [
             'type' => 'bot_message',
             'conversation_id' => $conversation->id,
-            'content' => $answer,
+            'content' => $chatResponse->message,
+            'ctas' => $chatResponse->ctas, // ajout CTA
+            'entities' => $chatResponse->entities,
             'created_at' => now()->toISOString(),
         ]);
 
@@ -164,7 +197,9 @@ class ChatController extends Controller
 
 
         return response()->json([
-            'answer' => $answer,
+            'answer' => $chatResponse->message,
+            'ctas' => $chatResponse->ctas, // front-end peut directement afficher
+            'entities' => $chatResponse->entities,
             'conversation_id' => $conversation->id,
         ]);
     }
