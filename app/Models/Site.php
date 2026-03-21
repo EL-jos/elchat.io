@@ -56,4 +56,8 @@ class Site extends BaseModel
         return $this->hasMany(ChatbotCta::class, 'site_id', 'id')
             ->orderBy('position');
     }
+
+    public function chunks(){
+        return $this->hasMany(Chunk::class);
+    }
 }

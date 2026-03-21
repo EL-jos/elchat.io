@@ -24,7 +24,7 @@ class PageImportJob implements ShouldQueue
     protected Document $document;
     protected array $mapping;
     protected Site $site;
-    public $timeout = 300;
+    public $timeout = 600;
 
     public function __construct(Document $document, array $mapping, Site $site)
     {

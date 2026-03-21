@@ -1,7 +1,6 @@
 <?php
 namespace App\Services\ia;
 
-use App\Models\Chunk;
 use App\Models\Conversation;
 use App\Models\Message;
 use App\Models\Site;
@@ -10,10 +9,8 @@ use App\Models\WidgetSetting;
 use App\Services\chunks\ChunkHydrationService;
 use App\Services\chunks\ChunkRankingService;
 use App\Services\cta\ChatResponse;
-use App\Services\cta\ContextRuleMatcher;
 use App\Services\cta\CTAEngine;
-use App\Services\cta\IntentRuleMatcher;
-use App\Services\cta\KeywordRuleMatcher;
+use App\Services\cta\CTARelevanceService;
 use App\Services\queryAnalyzer\IntentRouter;
 use App\Services\queryAnalyzer\LeadService;
 use App\Services\queryAnalyzer\NavigationService;
@@ -22,7 +19,6 @@ use App\Services\queryAnalyzer\TransactionService;
 use App\Services\rag\ContextCompressor;
 use App\Services\rag\ContextValidator;
 use App\Services\rag\RetrievalOptimizer;
-use App\Services\SimilarityService;
 use App\Services\vector\VectorSearchService;
 use App\Traits\TextNormalizer;
 use Exception;
@@ -85,6 +81,9 @@ class ChatService
         protected CTAEngine $CTAEngine,
 
         protected EntityExtractor $entityExtractor,
+
+        protected EntityRelevanceService $entityRelevanceService,
+        protected CTARelevanceService $ctaRelevanceService
     )
     {}
 
@@ -142,14 +141,13 @@ class ChatService
         // ─────────────────────────────
         // 0.5️⃣ Préparer la question (rewrite si follow-up)
         // ─────────────────────────────
-        $preparedQuestion = $this->prepareQuestion($question, $conversation);
+        //$preparedQuestion = $this->prepareQuestion($question, $conversation);
 
-        $queryPlan = $this->queryAnalyzer->analyze($preparedQuestion, $conversation);
-        /*Log::info("Query Plan Prepare", [
+        $queryPlan = $this->queryAnalyzer->analyze($question, $conversation);
+        Log::info("Query Plan Prepare", [
             "original_question" => $question,
-            "prepared_question" => $preparedQuestion,
             "queryPlan" => $queryPlan,
-        ]);*/
+        ]);
 
         /*$route = $this->intentRouter->route($queryPlan, $site);
         if (isset($this->handlers[$route])) {
@@ -201,7 +199,7 @@ class ChatService
             $partial = $this->vectorSearchService->search(
                 embedding: $embedding,
                 siteId: $site->id,
-                limit: $topK ?? $queryPlan->topK,
+                limit: $topK ?? $queryPlan->topK ?? 8,
                 scoreThreshold: floatval($site->settings->min_similarity_score),
                 collection: "chunks_{$site->id}"
             );
@@ -311,12 +309,12 @@ class ChatService
         $ragContextChunks = collect($ragContextChunks)
             ->map(fn($chunk) => [
                 ...$chunk,
-                'text' => $this->normalizeText($chunk['text']),
+                'text' => $chunk['text'],
             ])->toArray();
         $ragContextMessages = collect($ragContextMessages)
             ->map(fn($msg) => [
                 ...$msg,
-                'text' => $this->normalizeText($msg['text']),
+                'text' => $msg['text'],
             ])->toArray();
 
         // ─────────────────────────────
@@ -349,12 +347,29 @@ class ChatService
             'history' => $history,
         ]);*/
 
+        $entities = $this->entityRelevanceService->filterRelevant(
+            $entities,
+            $query,
+            $queryPlan->entities ?? []
+        );
+
+        $ctas = $this->CTAEngine->resolve($site, $queryPlan, $conversation);
+        Log::info("Resolved CTAs:", ['ctas' => $ctas]);
+        $ctas = $this->ctaRelevanceService->filterRelevant(
+            $ctas,
+            $queryPlan,
+            $query,
+            $entities
+        );
+
         $promptPayload = $this->promptBuilder->build(
             site: $site,
-            question: $query,
+            question: $question,
             context: $context,
             history: $history,
-            conversation: $conversation
+            conversation: $conversation,
+            cats: $ctas,
+            entities: $entities
         );
 
         //Log::info("Prompt Payload:", $promptPayload);
@@ -362,8 +377,6 @@ class ChatService
         // ─────────────────────────────
         // 8.5️⃣ Résolution CTA
         // ─────────────────────────────
-        $ctas = $this->CTAEngine->resolve($site, $queryPlan, $conversation);
-        Log::info("Resolved CTAs:", ['ctas' => $ctas]);
 
 
         // ─────────────────────────────
@@ -386,18 +399,20 @@ class ChatService
             "entities" => $entities,
         ]);
 
-        // Si réponse vide / non disponible mais entities présentes
-        if (
-            $validatedResponse ===  "Cette information n’est pas disponible dans nos documents internes."
-            &&
-            !empty($entities)
-        ) {
-            // Ajoute un texte introductif pour contextualiser les entities
-            $fallbackMessage = $this->buildEntitiesFallbackMessage($entities);
 
-            if ($fallbackMessage) {
-                $validatedResponse = $fallbackMessage;
+
+        // Si réponse vide / non disponible mais entities présentes
+        if ($validatedResponse ===  "Cette information n’est pas disponible dans nos documents internes.") {
+            // Ajoute un texte introductif pour contextualiser les entities
+
+            if (!empty($entities)){
+                $fallbackMessage = $this->buildEntitiesFallbackMessage($entities);
+
+                if ($fallbackMessage) {
+                    $validatedResponse = $fallbackMessage;
+                }
             }
+
         } elseif (!empty($entities)) {
 
             $validatedResponse .= "\n\n---\n\n💡 **Ressources utiles :**";
@@ -552,14 +567,10 @@ class ChatService
 
         return $question;
     }
-    private function prepareQuestion(string $question, Conversation $conversation): string
+    private function prepareQuestion(string $question): string
     {
-        $question = $this->enrichQuestionWithHistory($question, $conversation);
-        $normalized = $this->normalizeText($question);
-        if ($this->followUpDetector->isFollowUp($normalized, $conversation)) {
-            $normalized = $this->rewriter->rewrite($normalized, $conversation);
-        }
-        return $this->normalizeText($normalized);
+
+        return $question;
     }
 
     public function updateConversationSummary(Conversation $conversation): void

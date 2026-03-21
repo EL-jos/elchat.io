@@ -8,61 +8,38 @@ use Illuminate\Support\Facades\Log;
 
 class EntityExtractor
 {
+    protected array $transformers;
+
+    public function __construct()
+    {
+        $this->transformers = collect(config('entities.transformers'))
+            ->map(fn($class) => app($class))
+            ->toArray();
+    }
+
     public function extract(array $chunks): array
     {
-        return collect($chunks)
-            ->map(function ($chunk) {
+        $entities = [];
 
-                /*Log::info("ENTITY EXTRATOR", [
-                    "chunk" => $chunk
-                ]);*/
+        foreach ($chunks as $chunk) {
 
-                $source = $chunk['source_type'] ?? null;
-                $metadata = $chunk['metadata'] ?? [];
+            foreach ($this->transformers as $transformer) {
 
-                // 🛒 PRODUIT
-                if ($source === 'woocommerce' && isset($metadata['raw'])) {
-
-                    $p = $metadata['raw'];
-
-                    return [
-                        'id' => $chunk['id'],
-                        'type' => 'product',
-                        'title' => $p['product_name'] ?? null,
-                        'url' => $p['product_url'] ?? null,     // ✅ FIX
-                        'image' => $p['image_url'] ?? null,     // ✅ FIX
-                        'price' => $p['price'] ?? null,
-                    ];
+                if (!$transformer->supports($chunk)) {
+                    continue;
                 }
 
-                // 🌐 PAGE (via texte)
-                if (in_array($source, ['crawl', 'sitemap', 'manual'])) {
+                $entity = $transformer->transform($chunk);
 
-                    preg_match('/URL:\s(.+)/', $chunk['text'], $match);
-                    preg_match('/Page:\s(.+)/', $chunk['text'], $matchPageTitle);
-
-                    return [
-                        'id' => $chunk['id'],
-                        'type' => 'page',
-                        'title' => $chunk['title'] ?? $matchPageTitle[1] ?? 'Page',
-                        'url' => $match[1] ?? null,
-                    ];
+                if ($entity) {
+                    $entities[] = $entity;
                 }
 
-                // 📄 DOCUMENT
-                if ($source === 'document') {
+                break;
+            }
+        }
 
-                    return [
-                        'id' => $chunk['id'],
-                        'type' => 'document',
-                        'title' => $metadata['document_name'] ?? null,
-                        'url' => '/document/' . ($metadata['document_id'] ?? ''),
-                    ];
-                }
-
-                return null;
-            })
-            ->filter()
+        return collect($entities)
             ->unique(fn($e) => $e['url'] ?? $e['title'])
             ->values()
             ->take(4)

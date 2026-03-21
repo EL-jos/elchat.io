@@ -130,7 +130,7 @@ class VectorIndexService
                 'chunk_ids_count' => count($chunkIds),
                 'error'           => $e->getMessage(),
             ]);
-        } 
+        }
     }
 
     public function upsertMessage(
@@ -172,12 +172,41 @@ class VectorIndexService
                 'message_id'   => $messageId,
                 'result'     => $response->json(),
             ]);
-            
+
         } catch (Throwable $e) {
 
             Log::error('Qdrant message upsert failed', [
                 'collection' => $collection,
                 'message_id' => $messageId,
+                'error'      => $e->getMessage(),
+            ]);
+        }
+    }
+
+    public function deleteCollection(string $collection): void
+    {
+        try {
+            $response = $this->http()->delete(
+                "{$this->endpoint}/collections/{$collection}"
+            );
+
+            if ($response->failed()) {
+                Log::error('Qdrant collection delete failed', [
+                    'collection' => $collection,
+                    'status'     => $response->status(),
+                    'body'       => $response->body(),
+                ]);
+                return;
+            }
+
+            Log::info('Qdrant collection deleted', [
+                'collection' => $collection,
+                'result'     => $response->json(),
+            ]);
+
+        } catch (\Throwable $e) {
+            Log::error('Qdrant collection delete exception', [
+                'collection' => $collection,
                 'error'      => $e->getMessage(),
             ]);
         }

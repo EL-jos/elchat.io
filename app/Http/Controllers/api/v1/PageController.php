@@ -58,7 +58,10 @@ class PageController extends Controller
             ], 400);
         }
 
-        DB::transaction(function () use ($ids, $vectorIndexService) {
+        $page = Page::where('id', $ids[0])->first();
+        $site = $page->site;
+
+        DB::transaction(function () use ($ids, $vectorIndexService, &$site) {
 
             // 1️⃣ Récupérer toutes les pages
             $pages = Page::whereIn('id', $ids)->get();
@@ -75,8 +78,8 @@ class PageController extends Controller
             Chunk::whereIn('page_id', $ids)->delete();
 
             // 5️⃣ Supprimer les vecteurs après commit
-            DB::afterCommit(function () use ($chunkIds, $vectorIndexService) {
-                $vectorIndexService->deleteChunksBatch($chunkIds);
+            DB::afterCommit(function () use ($chunkIds, $vectorIndexService, &$site) {
+                $vectorIndexService->deleteChunksBatch($chunkIds, "chunks_{$site->id}");
             });
 
         });

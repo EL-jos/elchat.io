@@ -14,6 +14,7 @@ use App\Models\WidgetSetting;
 use App\Services\CrawlService;
 use App\Services\IndexService;
 use App\Services\vector\VectorCreationService;
+use App\Services\vector\VectorIndexService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
@@ -67,7 +68,7 @@ class SiteController extends Controller
             'include_pages' => $validated['include_pages'] ?? null,
             'favicon' => $this->getGoogleFaviconSecure($validated['url']),
         ]);
-        
+
         // 2️⃣ Création automatique de la collection Qdrant
         $collectionCreated = $vectorService->createSiteCollection(
             siteId: $site->id,
@@ -134,12 +135,27 @@ class SiteController extends Controller
     /**
      * Supprimer un site
      */
-    public function destroy($id)
+    public function destroy($id, VectorIndexService $indexService)
     {
+        /**
+         * @var Site $site
+         */
         $site = Site::where('id', $id)
             ->where('account_id', auth()->user()->ownedAccount->id)
             ->firstOrFail();
 
+
+        $site->chunks()->delete();
+        $indexService->deleteCollection("chunks_{$site->id}");
+        $site->crawlJobs()->delete();
+        $site->pages()->delete();
+        $site->conversations()->delete();
+        $site->unansweredQuestions()->delete();
+        $site->documents()->delete();
+        $site->settings()->delete();
+        $site->productIport()->delete();
+        $site->knowledgeQualityScore()->delete();
+        $site->ctas()->delete();
         $site->delete();
         return response()->json(['message'=>'Site deleted']);
     }

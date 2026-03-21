@@ -16,4 +16,8 @@ class Chunk extends BaseModel
     {
         return $this->belongsTo(Page::class);
     }
+
+    public function site(){
+        return $this->belongsTo(Site::class);
+    }
 }
