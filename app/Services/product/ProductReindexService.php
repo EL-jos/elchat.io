@@ -27,7 +27,7 @@ class ProductReindexService
         int $perPage = 20,
         ?string $search = null
     ): LengthAwarePaginator {
-        
+
         Log::info('[PRODUCT LIST] Début listing produits', [
             'site_id' => $siteId,
             'page' => $page,
@@ -232,7 +232,7 @@ class ProductReindexService
                 // 2️⃣ Suppression Qdrant en batch
                 $chunkIds = $oldChunks->pluck('id')->all();
                 if (!empty($chunkIds)) {
-                    $this->vectorIndexService->deleteChunksBatch($chunkIds);
+                    $this->vectorIndexService->deleteChunksBatch($chunkIds, collection: "chunks_{$document->documentable->id}");
                 }
 
                 // 3️⃣ Suppression MySQL

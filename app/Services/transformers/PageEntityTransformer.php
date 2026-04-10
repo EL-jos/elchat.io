@@ -11,7 +11,7 @@ class PageEntityTransformer implements EntityTransformer
         return in_array($chunk['source_type'] ?? null, ['crawl', 'sitemap', 'manual']);
     }
 
-    public function transform(array $chunk): ?array
+    /*public function transform(array $chunk): ?array
     {
         $metadata = $chunk['metadata'] ?? [];
         preg_match('/URL:\s(.+)/', $chunk['text'], $match);
@@ -27,5 +27,27 @@ class PageEntityTransformer implements EntityTransformer
             ];
         }
         return [];
+    }*/
+    public function transform(array $chunk): ?array
+    {
+        $metadata = $chunk['metadata'] ?? [];
+
+        $text = $chunk['text'] ?? '';
+
+        preg_match('/URL:\s(.+)/', $text, $match);
+        preg_match('/Page:\s(.+)/', $text, $matchPageTitle);
+
+        // 👉 On vérifie que l'index existe
+        if (!isset($match[1]) || trim($match[1]) === '') {
+            return [];
+        }
+
+        return [
+            'id' => $chunk['id'],
+            'type' => 'page',
+            'title' => $chunk['title'] ?? ($matchPageTitle[1] ?? 'Page'),
+            'url' => trim($match[1]),
+            'description' => $text,
+        ];
     }
 }

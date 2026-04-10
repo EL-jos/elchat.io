@@ -79,7 +79,7 @@ class RecrawlSinglePageJob implements ShouldQueue
                 ->toArray();
 
             if (!empty($chunkIds)) {
-                $vectorIndexService->deleteChunksBatch($chunkIds);
+                $vectorIndexService->deleteChunksBatch($chunkIds, collection: "chunks_{$site->id}");
                 Chunk::whereIn('id', $chunkIds)->delete();
             }
 

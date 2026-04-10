@@ -7,7 +7,7 @@ use App\Models\Chunk;
 use App\Models\CrawlJob;
 use App\Models\Page;
 use App\Models\Site;
-use App\Services\CrawlService;
+use App\Services\crawl\CrawlService;
 use App\Services\IndexService;
 use App\Services\vector\VectorIndexService;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -60,7 +60,7 @@ class SitemapPageBatchJob implements ShouldQueue
                         ->toArray();
 
                     if (!empty($chunkIds)) {
-                        $vectorIndexService->deleteChunksBatch($chunkIds);
+                        $vectorIndexService->deleteChunksBatch($chunkIds, "chunks_{$this->siteId}");
                         Chunk::whereIn('id', $chunkIds)->delete();
                     }
 
@@ -79,7 +79,7 @@ class SitemapPageBatchJob implements ShouldQueue
                     'siteId' => $site->name,
                     'page' => $page ? $page->id : '***',
                     'page_url'=> $page ? $page->url : '***'
-                ]); 
+                ]);
 
                 if ($page) {
                     $indexService->indexPage($page, [

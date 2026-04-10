@@ -415,7 +415,7 @@ class ChatService
 
         } elseif (!empty($entities)) {
 
-            $validatedResponse .= "\n\n---\n\n💡 **Ressources utiles :**";
+            $validatedResponse .= "\n\n---\n\n **Ressources utiles :**";
         }
 
         // Retour final avec CTAs

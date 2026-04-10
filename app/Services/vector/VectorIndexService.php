@@ -14,6 +14,7 @@ class VectorIndexService
     public function __construct()
     {
         $this->endpoint  = config('qdrant.url'); // http://127.0.0.1:6333
+        $this->timeout   = config('qdrant.timeout', 8);
         $this->collection = 'chunks';
     }
 

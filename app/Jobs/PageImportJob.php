@@ -6,7 +6,7 @@ use App\Models\Chunk;
 use App\Models\Document;
 use App\Models\Page;
 use App\Models\Site;
-use App\Services\CrawlService;
+use App\Services\crawl\CrawlService;
 use App\Services\IndexService;
 use App\Services\vector\VectorIndexService;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -36,11 +36,10 @@ class PageImportJob implements ShouldQueue
     public function handle(CrawlService $crawlService, IndexService $indexService, VectorIndexService $vectorIndexService)
     {
         Log::info("🚀 PageImportJob démarré pour le site {$this->site->id}");
-        $this->site->update(['status' => 'indexing']); // status début job
+        $this->site->update(['status' => 'indexing']);
 
         try {
-            $rows = $this->parseFile($this->document->path); // parse CSV/XLSX
-
+            $rows = $this->parseFile($this->document->path);
             $batchSize = 50;
             $chunks = array_chunk($rows, $batchSize);
 
@@ -50,50 +49,60 @@ class PageImportJob implements ShouldQueue
                 foreach ($batchRows as $row) {
                     $pageData = $this->mapRow($row);
 
-                    if (empty($pageData['content']) && empty($pageData['url'])) {
-                        // ❌ rien à faire
-                        continue;
+                    if (empty($pageData['content']) && empty($pageData['url'])) continue;
+
+                    // Normalisation URL
+                    $url = $pageData['url']
+                        ? $crawlService->normalizeUrl($pageData['url'])
+                        : null;
+
+                    // Préparer meta
+                    $meta = [
+                        'title' => $pageData['title'] ?? null,
+                        'description' => $pageData['seo_description'] ?? null,
+                        'keywords' => !empty($pageData['seo_keywords']) ? explode(',', $pageData['seo_keywords']) : [],
+                        'published_at' => $pageData['published_at'] ?? null,
+                    ];
+
+                    // Ajouter résumé, catégories, tags dans le contenu pour RAG
+                    $content = $pageData['content'] ?? '';
+                    if (!empty($pageData['excerpt'])) {
+                        $content = "<h2>Résumé</h2><p>{$pageData['excerpt']}</p>" . $content;
+                    }
+                    if (!empty($pageData['categories'])) {
+                        $content .= "<h3>Catégories</h3><p>{$pageData['categories']}</p>";
+                    }
+                    if (!empty($pageData['tags'])) {
+                        $content .= "<h3>Tags</h3><p>{$pageData['tags']}</p>";
                     }
 
+                    // Process content via CrawlService pour RAG
+                    $processed = $crawlService->processRawContent($this->site, $content, $meta, $url);
+
+                    // Créer ou update page
                     $page = Page::updateOrCreate(
                         [
                             'site_id' => $this->site->id,
-                            'url'     => $pageData['url'] ?? null,
+                            'url' => $url,
                         ],
                         [
-                            'title'   => $pageData['title'] ?? null,
-                            'content' => $pageData['content'] ?? null,
-                            'source'  => 'import',
+                            'title' => $pageData['title'] ?? null,
+                            'content' => $processed['content'],
+                            'plain_text' => $processed['plain_text'],
+                            //'type'       => $processed['type'] ?? 'article',
+                            //'importance' => $processed['importance'] ?? 2.5,
+                            'source' => 'import',
                         ]
                     );
 
-                    Log::info("📄 Page préparée: {$page->title} | URL: {$page->url}");
+                    Log::info("📄 Page traitée: {$page->title} | URL: {$page->url}");
 
-                    // Crawl si content vide et url présente
-                    if (empty($pageData['content']) && !empty($pageData['url'])) {
-                        $crawledPage = $crawlService->crawlSinglePage(
-                            $this->site,
-                            $pageData['url'],
-                            0,
-                            null
-                        );
-
-                        if ($crawledPage) {
-                            $page->update(['content' => $crawledPage->content]);
-                            Log::info("🕸️ Crawl réussi pour URL: {$page->url}");
-                        } else {
-                            Log::warning("⚠️ Crawl échoué pour URL: {$page->url}");
-                            continue;
-                        }
-                    }
-
-                    // Indexation si content présent
+                    // Indexation RAG
                     if (!empty($page->content)) {
-
-                        // 🔹 Supprimer les anciens chunks si existants
+                        // Supprimer anciens chunks
                         $existingChunks = Chunk::where('page_id', $page->id)->pluck('id')->all();
                         if (!empty($existingChunks)) {
-                            $vectorIndexService->deleteChunksBatch($existingChunks);
+                            $vectorIndexService->deleteChunksBatch($existingChunks, "chunks_{$this->site->id}");
                             Chunk::whereIn('id', $existingChunks)->delete();
                             Log::info("♻️ Chunks existants supprimés pour la page: {$page->title}");
                         }
@@ -106,7 +115,7 @@ class PageImportJob implements ShouldQueue
                 Log::info("📦 Batch {$batchIndex} terminé pour site {$this->site->id}");
             }
 
-            $this->site->update(['status' => 'ready']); // status fin job
+            $this->site->update(['status' => 'ready']);
             Log::info("🎉 PageImportJob terminé avec succès pour site {$this->site->id}");
 
         } catch (\Throwable $e) {
@@ -115,7 +124,6 @@ class PageImportJob implements ShouldQueue
             throw $e;
         }
     }
-
     protected function parseFile(string $path): array
     {
         $extension = strtolower(pathinfo($path, PATHINFO_EXTENSION));
@@ -152,7 +160,6 @@ class PageImportJob implements ShouldQueue
 
         return $rows;
     }
-
     protected function mapRow(array $row): array
     {
         return [

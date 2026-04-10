@@ -10,6 +10,7 @@ use App\Services\vector\VectorIndexService;
 use App\Traits\TextNormalizer;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
 class IndexService
 {
@@ -19,10 +20,6 @@ class IndexService
         protected EmbeddingService $embeddingService,
         protected VectorIndexService $vectorIndexService
     ) {}
-
-    /**
-     * Point d'entrée UNIQUE
-     */
     public function indexPage(Page $page, array $context = []): void
     {
         // 🛑 Idempotence  : ne jamais réindexer
@@ -42,7 +39,14 @@ class IndexService
 
                 if ($this->chunkAlreadyExists($page, $textChunk)) continue;
                 if (trim($textChunk) === '') continue;
-                $embedding = $this->embeddingService->getEmbedding($textChunk);
+                //$embedding = $this->embeddingService->getEmbedding($textChunk);
+                if (!($chunkData['no_embedding'] ?? false)) {
+                    $embedding = $this->embeddingService->getEmbedding($textChunk);
+                } else {
+                    $embedding = null;
+                }
+
+                $hash = hash('sha256', $textChunk . ($page->id ?? ''));
 
                 $chunk = Chunk::create([
                     'page_id'     => $page->id,
@@ -51,19 +55,26 @@ class IndexService
                     'text'        => $textChunk,
                     'priority'    => $priority,
                     'document_id' => null,
+                    'hash'        => $hash,
                 ]);
 
-                $this->vectorIndexService->upsertChunk(
-                    siteId: $page->site->id,
-                    chunkId: $chunk->id,
-                    embedding: $embedding,
-                    payload: [
-                        'site_id'  => $chunk->site_id,
-                        'page_id'  => $chunk->page_id,
-                        'priority' => $priority,
-                    ],
-                    collection: "chunks_{$chunk->site_id}"
-                );
+                if ($embedding) {
+                    $this->vectorIndexService->upsertChunk(
+                        siteId: $page->site->id,
+                        chunkId: $chunk->id,
+                        embedding: $embedding,
+                        payload: [
+                            'site_id'  => $chunk->site_id,
+                            'page_id'  => $chunk->page_id,
+                            'priority' => $priority,
+                            'source'  => $page->source,
+                            'title'   => $page->title,
+                            'url'     => $page->url,
+                        ],
+                        collection: "chunks_{$chunk->site_id}"
+                    );
+                }
+
             }
 
             // ✅ Page marquée indexée SEULEMENT si tout est OK
@@ -90,10 +101,6 @@ class IndexService
             throw $e; // laisse le job gérer le retry
         }
     }
-
-    /**
-     * Construction des chunks
-     */
     protected function buildChunks(Page $page): array
     {
         // Cas 1 : contenu structuré (JSON depuis CrawlService B)
@@ -106,19 +113,24 @@ class IndexService
         // Cas 2 : contenu brut (fallback robuste)
         return $this->buildChunksFromRawText($page);
     }
-
     protected function buildChunksFromSections(Page $page, array $sections): array
     {
         $chunks = [];
 
         foreach ($sections as $sectionIndex => $section) {
-            $sectionTitle = trim($section['title'] ?? '');
+            //$sectionTitle = trim($section['title'] ?? '');
+            $sectionTitle = trim(
+                $section['title']
+                ?? $section['h2']
+                ?? ''
+            );
             $content      = trim($section['content'] ?? '');
 
             //if (mb_strlen($content) < 100) continue; //Elle empêche l’indexation des petites sections.
 
             $contextHeader = implode("\n", array_filter([
                 $page->title ? "Page: {$page->title}" : null,
+                $section['h1'] ?? null, // 🔥 AJOUT CRITIQUE
                 $sectionTitle ? "Section: {$sectionTitle}" : null,
                 "URL: {$page->url}",
             ]));
@@ -126,16 +138,26 @@ class IndexService
             $fullText = $contextHeader . "\n\n" . $content;
 
             foreach ($this->chunkBySentences($fullText, 800, 120) as $chunkText) {
+                $weight = $section['weight'] ?? 1;
+
+                //$base = $this->computePriority($sectionIndex, $sectionTitle);
+
+                $semantic = $this->computeSemanticPriority($chunkText, 'section');
+
+                $priority = (int) round($semantic * (0.7 + 0.3 * $weight));
+
                 $chunks[] = [
                     'text' => $chunkText,
-                    'priority' => $this->computePriority($sectionIndex, $sectionTitle),
+                    'priority' => $priority,
+                    // 🔥 IMPORTANT
+                    'no_embedding' => $section['no_embedding'] ?? false,
+                    'type' => $sectionTitle === 'Overview' ? 'overview' : 'section',
                 ];
             }
         }
 
         return $chunks;
     }
-
     protected function buildChunksFromRawText(Page $page): array
     {
         $text = trim($page->content);
@@ -156,7 +178,6 @@ class IndexService
 
         return $chunks;
     }
-
     protected function chunkBySentences(string $text, int $maxChars, int $overlapChars): array
     {
         $sentences = preg_split('/(?<=[.!?])\s+/', $text);
@@ -181,12 +202,12 @@ class IndexService
 
         return $chunks;
     }
-
-    /**
-     * Calcul de la priorité d'un chunk
-     */
     protected function computePriority(int $sectionIndex, ?string $title): int
     {
+        Log::info("SectionIndex dans computePriority", [
+            "sectionIndex" => $sectionIndex,
+            "title"       => $title,
+        ]);
         $score = 50; // valeur neutre par défaut
 
         if ($sectionIndex === 0) $score += 20;
@@ -197,18 +218,15 @@ class IndexService
 
         return $score;
     }
-    /**
-     * Déduplication par hash
-     */
     protected function chunkAlreadyExists(Page $page, string $text): bool
     {
-        $hash = sha1($text);
+        //$hash = sha1($text);
+        $hash = hash('sha256', $text . ($page->id ?? ''));
 
         return Chunk::where('site_id', $page->site_id)
-            ->whereRaw('SHA1(text) = ?', [$hash])
+            ->where('hash', $hash)
             ->exists();
     }
-
     /**
      * Découpe avec overlap
      */
@@ -229,7 +247,6 @@ class IndexService
 
         return $chunks;
     }
-
     /**
      * Indexe un document (PDF, Word, TXT)
      */
@@ -270,7 +287,12 @@ class IndexService
 
                 try {
                     if (trim($textChunk) === '') continue;
-                    $embedding = $this->embeddingService->getEmbedding($textChunk);
+                    //$embedding = $this->embeddingService->getEmbedding($textChunk);
+                    if (!($chunkData['no_embedding'] ?? false)) {
+                        $embedding = $this->embeddingService->getEmbedding($textChunk);
+                    } else {
+                        $embedding = null;
+                    }
                 } catch (\Throwable $e) {
                     Log::warning("Embedding échoué pour document {$document->id}", [
                         'chunk_preview' => mb_substr($textChunk, 0, 100),
@@ -278,6 +300,8 @@ class IndexService
                     ]);
                     continue; // on skip ce chunk mais pas tout le document
                 }
+
+                $hash = hash('sha256', $textChunk);
 
                 $chunk = Chunk::create([
                     'page_id'     => null,
@@ -287,22 +311,26 @@ class IndexService
                     'text'        => $textChunk,
                     'priority'    => $priority,
                     'metadata'    => $metadata,
+                    'hash'        => $hash
                 ]);
 
-                $this->vectorIndexService->upsertChunk(
-                    siteId: $siteId,
-                    chunkId: $chunk->id,
-                    embedding: $embedding,
-                    payload: array_merge([
-                        'site_id'     => $chunk->site_id,
-                        'page_id'     => $chunk->page_id,
-                        'document_id' => $chunk->document_id,
-                        'source_type' => $chunk->source_type,
-                        'priority'    => $chunk->priority,
-                        'metadata'    => $metadata
-                    ]),
-                    collection: "chunks_{$chunk->site_id}"
-                );
+                if ($embedding) {
+                    $this->vectorIndexService->upsertChunk(
+                        siteId: $siteId,
+                        chunkId: $chunk->id,
+                        embedding: $embedding,
+                        payload: array_merge([
+                            'site_id'     => $chunk->site_id,
+                            'page_id'     => $chunk->page_id,
+                            'document_id' => $chunk->document_id,
+                            'source_type' => $chunk->source_type,
+                            'priority'    => $chunk->priority,
+                            'metadata'    => $metadata
+                        ]),
+                        collection: "chunks_{$chunk->site_id}"
+                    );
+                }
+
             }
 
             DB::commit();
@@ -385,18 +413,24 @@ class IndexService
 
         return $chunks;
     }
-
-    protected function chunkAlreadyExistsForDocument(Document $document, string $text): bool
+    protected function chunkAlreadyExistsForDocument(Document $document, string $text, ?string $productId = null): bool
     {
-        $hash = sha1($text);
+        //$hash = sha1($text);
+        //$hash = sha1($text . ($identifier ?? ''));
 
-        return Chunk::where('site_id', $document->documentable->id)
-            ->whereRaw('SHA1(text) = ?', [$hash])
-            ->exists();
+        $hash = hash('sha256', $text . ($productId ?? ''));
+
+        $query = Chunk::where('site_id', $document->documentable->id)
+            ->where('hash', $hash);
+
+        if ($productId !== null) {
+            //$query->where('metadata->identifier', $identifier);
+            $query->where('source_type', 'woocommerce')
+            ->where('metadata->product_id', $productId);
+        }
+
+        return $query->exists();
     }
-    /**
-     * Extraction du texte selon type
-     */
     protected function extractTextFromDocument(string $path, string $extension): string
     {
         $fullPath = public_path($path);
@@ -448,7 +482,6 @@ class IndexService
         if (!file_exists($fullPath)) return '';
         return trim(file_get_contents($fullPath));
     }
-
     /**
      * Indexe un produit standard dans un document
      */
@@ -457,7 +490,7 @@ class IndexService
         $productIndex = $priority + 1;
 
         $identifier = $product['identifier'] ?? $product['product_name'] ?? $product['product_reference'] ?? 'unknown-product';
-
+        $productId = hash('sha256', $identifier);
 
         Log::info('Indexation produit démarrée', [
             'document_id'   => $document->id,
@@ -487,7 +520,7 @@ class IndexService
 
         if ($existingChunks->isNotEmpty()) {
             $chunkIds = $existingChunks->pluck('id')->all();
-            $this->vectorIndexService->deleteChunksBatch($chunkIds);
+            $this->vectorIndexService->deleteChunksBatch($chunkIds, collection: "chunks_{$document->documentable->id}");
             Chunk::whereIn('id', $chunkIds)->delete();
 
             Log::info('Ancien produit supprimé pour nouveau document', [
@@ -499,30 +532,83 @@ class IndexService
 
         DB::beginTransaction();
 
+
+
         try {
-            $chunksToCreate = [];
+            //=====================================
+            //=         PRODUIT SECTION           =
+            //=====================================
+            // 🔹 NEW: produit → sections
+            $structured = $this->productToSections($product);
+            // 🔹 Fake Page pour réutiliser ton pipeline existant
+            $page = new Page([
+                'id' => (string) Str::uuid(),
+                'site_id' => $document->documentable->id,
+                'title' => $product['product_name'] ?? 'Produit',
+                'url' => $product['product_url'] ?? null,
+                'content' => json_encode($structured),
+                'source' => 'product',
+            ]);
+            // 🔹 Générer les chunks via ton moteur existant
+            $chunks = $this->buildChunksFromSections($page, $structured['sections']);
+            // 🔹 Sauvegarde + embeddings
+            foreach ($chunks as $chunkData) {
+                $textChunk = $chunkData['text'];
+                $priority  = $chunkData['priority'];
 
-            // 🔹 1️⃣ Chunk global (contexte complet)
-            $parts = [];
-            foreach ($product as $key => $value) {
-                if ($value) {
-                    $parts[] = ucfirst(str_replace('_', ' ', $key)) . ": " . $value;
+                if (trim($textChunk) === '') continue;
+                if ($this->chunkAlreadyExistsForDocument($document, $textChunk, $productId)) continue;
+
+                try {
+                    //$embedding = $this->embeddingService->getEmbedding($textChunk);
+                    if (!($chunkData['no_embedding'] ?? false)) {
+                        $embedding = $this->embeddingService->getEmbedding($textChunk);
+                    } else {
+                        $embedding = null;
+                    }
+                } catch (\Throwable $e) {
+                    Log::warning("Embedding échoué (section produit)", [
+                        'document_id' => $document->id,
+                        'preview' => mb_substr($textChunk, 0, 100),
+                    ]);
+                    continue;
                 }
-            }
 
-            $globalText = implode(". ", $parts) . ".";
-
-            if (!$this->chunkAlreadyExistsForDocument($document, $globalText)) {
-                $chunksToCreate[] = [
-                    'text'     => $globalText,
-                    'priority' => $productIndex,
-                    'metadata' => [
-                        'type' => 'global',
+                $hash = hash('sha256', $textChunk . $productId);
+                $chunk = Chunk::create([
+                    'document_id' => $document->id,
+                    'site_id'     => $document->documentable->id,
+                    'source_type' => 'woocommerce',
+                    'text'        => $textChunk,
+                    'priority'    => $priority,
+                    'metadata'    => [
+                        'type' => 'section',
                         'identifier' => $identifier,
-                        'product_index' => $productIndex,
-                        'raw' => $product,
+                        'product_id' => $productId, // 🔥 AJOUT
+                        //'overview' => $this->buildProductOverview($product),
+                        //'field' => $section['h2'] ?? null,
                     ],
-                ];
+                    'hash' => $hash,
+                ]);
+
+                if ($embedding) {
+                    $this->vectorIndexService->upsertChunk(
+                        siteId: $chunk->site_id,
+                        chunkId: $chunk->id,
+                        embedding: $embedding,
+                        payload: [
+                            'site_id'     => $chunk->site_id,
+                            'document_id' => $chunk->document_id,
+                            'source_type' => $chunk->source_type,
+                            'priority'    => $chunk->priority,
+                            'product_id'  => $productId, // 🔥 ICI
+                            'metadata' => $chunk->metadata,
+                            'has_overview' => true,
+                        ],
+                        collection: "chunks_{$chunk->site_id}"
+                    );
+                }
+
             }
 
             // 🔹 2️⃣ Chunks granulaires avec alias et synonymes
@@ -534,12 +620,12 @@ class IndexService
                 foreach ($splitValues($value) as $v) {
                     if ($v === '') continue;
 
-                    $aliases = $this->generateStatisticalAliases(str_replace('_', ' ', $field), $v);
+                    $aliases = $this->generateStatisticalAliases($field, $v);
 
                     foreach ($aliases as $aliasText) {
                         if (strlen($aliasText) < 3) continue;
                         if (str_word_count($aliasText) === 1 && strlen($aliasText) < 4) continue;
-                        if ($this->chunkAlreadyExistsForDocument($document, $aliasText)) continue;
+                        if ($this->chunkAlreadyExistsForDocument($document, $aliasText, $productId)) continue;
 
                         try {
                             if (trim($aliasText) === '') continue;
@@ -554,19 +640,27 @@ class IndexService
                             continue;
                         }
 
+                        $hash = hash('sha256', $aliasText . $productId);
+
                         $chunk = Chunk::create([
                             'document_id' => $document->id,
                             'site_id'     => $document->documentable->id,
                             'source_type' => 'woocommerce',
                             'text'        => $aliasText,
-                            'priority'    => $productIndex + 10,
+                            'priority'    => $this->computeSemanticPriority(
+                                $aliasText,
+                                type: 'alias',
+                                field: $field
+                            ),
                             'metadata'    => [
                                 'type' => 'statistical_alias',
                                 'field' => $field,
                                 'value' => $v,
                                 'identifier' => $identifier,
+                                'product_id' => $productId, // 🔥 AJOUT
                                 'product_index' => $productIndex,
                             ],
+                            'hash' => $hash,
                         ]);
 
                         if ($chunk) {
@@ -580,51 +674,14 @@ class IndexService
                                     'document_id' => $chunk->document_id,
                                     'source_type' => $chunk->source_type,
                                     'priority'    => $chunk->priority,
+                                    'product_id'  => $productId, // 🔥 ICI
+                                    'metadata' => $chunk->metadata,
+                                    'has_overview' => false,
                                 ],
                                 collection: "chunks_{$chunk->site_id}"
                             );
                         }
                     }
-                }
-            }
-
-            // 🔹 3️⃣ Création des chunks globaux
-            foreach ($chunksToCreate as $chunkData) {
-                try {
-                    if (trim($chunkData['text']) === '') continue;
-                    $embedding = $this->embeddingService->getEmbedding($chunkData['text']);
-                } catch (\Throwable $e) {
-                    Log::warning("Embedding échoué pour chunk global produit", [
-                        'document_id' => $document->id,
-                        'chunk_preview' => mb_substr($chunkData['text'], 0, 100),
-                        'error' => $e->getMessage(),
-                    ]);
-                    continue;
-                }
-
-                $chunk = Chunk::create([
-                    'document_id' => $document->id,
-                    'site_id'     => $document->documentable->id,
-                    'source_type' => 'woocommerce',
-                    'text'        => $chunkData['text'],
-                    'metadata'    => $chunkData['metadata'],
-                    'priority'    => $chunkData['priority'],
-                ]);
-
-                if ($chunk) {
-                    $this->vectorIndexService->upsertChunk(
-                        siteId: $document->documentable->id,
-                        chunkId: $chunk->id,
-                        embedding: $embedding,
-                        payload: [
-                            'site_id'     => $chunk->site_id,
-                            'page_id'     => $chunk->page_id,
-                            'document_id' => $chunk->document_id,
-                            'source_type' => $chunk->source_type,
-                            'priority'    => $chunk->priority,
-                        ],
-                        collection: "chunks_{$chunk->site_id}"
-                    );
                 }
             }
 
@@ -634,7 +691,7 @@ class IndexService
                 'document_id'    => $document->id,
                 'product_index'  => $productIndex,
                 'identifier'     => $identifier,
-                'chunks_created' => count($chunksToCreate),
+                'chunks_created' => count($chunks),
             ]);
 
         } catch (\Throwable $e) {
@@ -654,17 +711,21 @@ class IndexService
     {
         $aliases = [];
         $label = $this->normalizeText($label);
-        $value = $this->normalizeText($value);
+        //$value = $this->normalizeText($value);
+        //$label = ucfirst(str_replace('_', ' ', $label));
+        $value = trim($value);
+
+        if ($value === '') return [];
 
         // Forme complète
         $aliases[] = "{$label}: {$value}";
 
         // Valeur seule
-        $aliases[] = $value;
+        //$aliases[] = $value;
 
         // Tokens individuels
-        foreach (explode(' ', $value) as $token) {
-            if (strlen($token) >= 3) $aliases[] = $token;
+        if (strlen($value) > 3 && str_word_count($value) <= 6) {
+            $aliases[] = $value;
         }
 
         // Synonymes depuis FieldSynonym
@@ -685,5 +746,113 @@ class IndexService
 
         return array_unique($aliases);
     }
+    protected function productToSections(array $product): array
+    {
+        $sections = [];
+        $identifier = $product['identifier'] ?? $product['product_name'] ?? $product['product_reference'] ?? 'unknown-product';
 
+        $h1 = $product['product_name'] ?? 'Produit';
+
+        foreach ($product as $field => $value) {
+            if (!$value) continue;
+
+            $values = is_array($value)
+                ? $value
+                : array_filter(array_map('trim', preg_split('/[,;|]/', $value)));
+
+            if (empty($values)) continue;
+
+            $label = ucfirst(str_replace('_', ' ', $field));
+
+            $sections[] = [
+                'h1' => $h1,
+                'h2' => $label,
+                'content' => implode(', ', $values),
+                'weight' => $this->getFieldWeight($field),
+            ];
+        }
+
+        $sections[] = [
+            'h1' => $h1,
+            'h2' => 'Overview',
+            'content' => $this->buildProductOverview($product),
+            'weight' => 3.5,
+            'no_embedding' => true,
+        ];
+
+        return [
+            'sections' => $sections,
+            'type' => 'product',
+            'meta' => [
+                'identifier' => $identifier,
+            ]
+        ];
+    }
+    protected function getFieldWeight(string $field): float
+    {
+        return match ($field) {
+            'product_name' => 3,
+            'description' => 2.5,
+            'features' => 2,
+            'short_description' => 2,
+            'product_category' => 1.8,
+            'brand' => 1.5,
+            'price' => 1.3,
+            'discount_price' => 1.3,
+            default => 1,
+        };
+    }
+    protected function buildProductOverview(array $product): string
+    {
+        $parts = [];
+
+        foreach ($product as $key => $value) {
+            if (!$value) continue;
+
+            if (is_array($value)) {
+                $value = implode(', ', $value);
+            }
+
+            $parts[] = ucfirst(str_replace('_', ' ', $key)) . ': ' . $value;
+        }
+
+        return implode('. ', $parts);
+    }
+    protected function computeSemanticPriority(
+        string $text,
+        string $type = 'section',
+        ?string $field = null
+    ): int {
+        $score = 50; // base neutre (IMPORTANT)
+
+        // 🔹 Type = signal léger (pas dominant)
+        if ($type === 'section') {
+            $score += 5;
+        } elseif ($type === 'alias') {
+            $score -= 5;
+        }
+
+        // 🔹 Champ = léger hint (pas ranking global)
+        if ($field) {
+            $fieldBoost = match ($field) {
+                'product_name', 'title' => 8,
+                'description' => 5,
+                'features' => 4,
+                'category' => 3,
+                'brand' => 2,
+                default => 0
+            };
+
+            $score += $fieldBoost;
+        }
+
+        // 🔹 Longueur (évite bruit extrême)
+        $len = str_word_count($text);
+
+        if ($len < 3) $score -= 10;
+        if ($len > 80) $score -= 5;
+
+        // 🔹 Clamp strict
+        return max(10, min(90, $score));
+    }
 }
