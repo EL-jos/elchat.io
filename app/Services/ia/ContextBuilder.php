@@ -29,8 +29,24 @@ class ContextBuilder
             $text = preg_replace('/\s+/u', ' ', $text);
             $text = trim($text);
 
-            $sourceType = $chunk['source_type'] ?? 'document';
+            $rawType = $chunk['source_type'] ?? 'unknown';
+
+            $typeMap = [
+                'manual'      => 'internal_knowledge',
+                'woocommerce' => 'product',
+                'page'        => 'webpage',
+                'crawl'       => 'webpage',
+                'import'      => 'webpage',
+                'document'    => 'document',
+            ];
+
+            $sourceType = $typeMap[$rawType] ?? 'document';
             $priority = $chunk['priority'] ?? 'normal';
+            // 🔥 Score de pertinence
+            $score = round($chunk['final_score'] ?? 0, 3);
+            // 🔥 Importance label
+            $importance = $score > 0.8 ? 'HIGH' : ($score > 0.6 ? 'MEDIUM' : 'LOW');
+
 
             $metadata = json_decode($chunk['metadata'] ?? '{}', true) ?? [];
 
@@ -43,6 +59,8 @@ class ContextBuilder
 
             $header = "DOCUMENT {$docIndex}\n";
             $header .= "TYPE: {$sourceType}\n";
+            $header .= "RELEVANCE: {$score}\n";
+            $header .= "IMPORTANCE: {$importance}\n";
 
             if ($title) {
                 $header .= "TITLE: {$title}\n";
@@ -50,6 +68,10 @@ class ContextBuilder
 
             if ($url) {
                 $header .= "URL: {$url}\n";
+            }
+
+            if ($sourceType === 'product') {
+                $header .= "CONTENT_TYPE: PRODUCT_INFO\n";
             }
 
             $header .= "PRIORITY: {$priority}\n\n";

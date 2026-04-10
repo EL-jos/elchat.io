@@ -61,7 +61,8 @@ class RetrievalOptimizer
                 $boost += 0.25;
             }
 
-            $chunk['score'] = $score + $boost;
+            $chunk['retrieval_boost'] = $score;
+            $chunk['score'] = ($score * 0.8) + ($boost * 0.2);
         }
 
         // resort

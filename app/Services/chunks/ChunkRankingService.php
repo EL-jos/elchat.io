@@ -23,13 +23,16 @@ class ChunkRankingService
         // 1️⃣ Calcul du score final pour chaque chunk
         $ranked = array_map(function ($chunk) {
 
+
             $priorityWeight = 1 / (1 + max(1, (int)$chunk['priority']));
             $sourceWeight = $this->sourceWeights[$chunk['source_type']] ?? 0.6;
+            // 🔥 CRITIQUE : utiliser le score IA
+            $baseScore = $chunk['final_score'] ?? $chunk['score'] ?? 0;
 
             $finalScore =
-                ($chunk['vector_score'] * 0.65)
-                + ($priorityWeight * 0.20)
-                + ($sourceWeight * 0.15);
+                ($baseScore * 0.65) +   // 🔥 LLM dominant
+                ($priorityWeight * 0.20) +
+                ($sourceWeight * 0.15);
 
             return array_merge($chunk, [
                 'final_score' => round($finalScore, 4),

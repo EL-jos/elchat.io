@@ -59,10 +59,16 @@ class ChunkHydrationService
             $hydrated[] = [
                 'id' => $chunk->id,
                 'text' => $textContent,
+                // 🔥 SIGNALS
                 'vector_score' => $result['score'] ?? 0.0,
+                'rrf_score' => $result['rrf_score'] ?? null, // si dispo
+                'keyword_score' => $result['keyword_score'] ?? null,
+                'llm_score' => $result['llm_score'] ?? null,
+                // meta
                 'priority' => $chunk->priority ?? 100,
                 'source_type' => $chunk->source_type ?? 'unknown',
                 'metadata' => $chunk->metadata,
+                'length' => strlen($textContent),
             ];
 
             /*Log::info('Hydrated chunk text', [

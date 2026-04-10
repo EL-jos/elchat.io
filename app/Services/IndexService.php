@@ -6,6 +6,7 @@ use App\Models\Document;
 use App\Models\FieldSynonym;
 use App\Models\Page;
 use App\Services\ia\EmbeddingService;
+use App\Services\lexical\LexicalIndexService;
 use App\Services\vector\VectorIndexService;
 use App\Traits\TextNormalizer;
 use Illuminate\Support\Facades\DB;
@@ -18,7 +19,8 @@ class IndexService
     use TextNormalizer;
     public function __construct(
         protected EmbeddingService $embeddingService,
-        protected VectorIndexService $vectorIndexService
+        protected VectorIndexService $vectorIndexService,
+        protected LexicalIndexService  $lexicalIndexService,
     ) {}
     public function indexPage(Page $page, array $context = []): void
     {
@@ -31,6 +33,8 @@ class IndexService
 
         try {
             $chunks = $this->buildChunks($page);
+
+            $this->lexicalIndexService->ensureIndex($page->site_id);
 
             foreach ($chunks as $i => $chunkData) {
                 $textChunk = $chunkData['text'];
@@ -57,6 +61,17 @@ class IndexService
                     'document_id' => null,
                     'hash'        => $hash,
                 ]);
+
+                $this->lexicalIndexService->upsertChunk([
+                    'id' => (string) $chunk->id,
+                    'text' => $chunk->text,
+                    'content' => $chunk->text, // 🔥 duplication stratégique
+                    'title' => $page->title ?? null,
+                    'url' => $page->url ?? null,
+                    'site_id' => $chunk->site_id,
+                    'source_type' => $chunk->source_type,
+                    'priority' => $chunk->priority,
+                ], $chunk->site_id);
 
                 if ($embedding) {
                     $this->vectorIndexService->upsertChunk(
@@ -275,6 +290,8 @@ class IndexService
                 120  // overlap
             );
 
+            $this->lexicalIndexService->ensureIndex($siteId);
+
             // 3️⃣ Insertion et vectorisation
             foreach ($chunks as $chunkData) {
                 $textChunk = $chunkData['text'];
@@ -313,6 +330,17 @@ class IndexService
                     'metadata'    => $metadata,
                     'hash'        => $hash
                 ]);
+
+                $this->lexicalIndexService->upsertChunk([
+                    'id' => (string) $chunk->id,
+                    'site_id' => $chunk->site_id,
+                    'document_id' => $chunk->document_id,
+                    'source_type' => $chunk->source_type,
+                    'text' => $chunk->text,
+                    'content' => $chunk->text, // 🔥 duplication stratégique
+                    'priority' => $chunk->priority,
+                    'metadata' => $chunk->metadata,
+                ], $chunk->site_id);
 
                 if ($embedding) {
                     $this->vectorIndexService->upsertChunk(
@@ -551,6 +579,10 @@ class IndexService
             ]);
             // 🔹 Générer les chunks via ton moteur existant
             $chunks = $this->buildChunksFromSections($page, $structured['sections']);
+
+            $splitValues = fn(string $value): array => array_filter(array_map('trim', preg_split('/[,;|]/', trim($value))));
+
+            $this->lexicalIndexService->ensureIndex($document->documentable->id);
             // 🔹 Sauvegarde + embeddings
             foreach ($chunks as $chunkData) {
                 $textChunk = $chunkData['text'];
@@ -591,6 +623,33 @@ class IndexService
                     'hash' => $hash,
                 ]);
 
+                $aliasesMap = [];
+
+                foreach ($product as $field => $value) {
+                    if (!$value) continue;
+
+                    foreach ($splitValues($value) as $v) {
+                        if ($v === '') continue;
+
+                        foreach ($this->generateStatisticalAliasesLexical($field, $v) as $alias) {
+                            $aliasesMap[$alias] = true; // anti-dup direct
+                        }
+                    }
+                }
+
+                $aliases = array_keys($aliasesMap);
+
+                $this->lexicalIndexService->upsertChunk([
+                    'id' => (string) $chunk->id,
+                    'site_id' => $chunk->site_id,
+                    'source_type' => $chunk->source_type,
+                    'text' => $chunk->text,
+                    'content' => $chunk->text, // 🔥 duplication stratégique
+                    'aliases' => $aliases, // 🔥 ici
+                    'priority' => $chunk->priority,
+                    'metadata' => $chunk->metadata,
+                ], $chunk->site_id);
+
                 if ($embedding) {
                     $this->vectorIndexService->upsertChunk(
                         siteId: $chunk->site_id,
@@ -612,7 +671,7 @@ class IndexService
             }
 
             // 🔹 2️⃣ Chunks granulaires avec alias et synonymes
-            $splitValues = fn(string $value): array => array_filter(array_map('trim', preg_split('/[,;|]/', trim($value))));
+            //$splitValues = fn(string $value): array => array_filter(array_map('trim', preg_split('/[,;|]/', trim($value))));
 
             foreach ($product as $field => $value) {
                 if (!$value) continue;
@@ -854,5 +913,84 @@ class IndexService
 
         // 🔹 Clamp strict
         return max(10, min(90, $score));
+    }
+    protected function generateStatisticalAliasesLexical(string $label, string $value): array
+    {
+        $aliases = [];
+
+        //$label = $this->normalizeText($label);
+        $label = trim($label);
+        $value = trim($value);
+
+        if ($value === '') return [];
+
+        $group = $this->getFieldGroup($label);
+        $boost = $this->getFieldBoost($label);
+
+        // 0. fallback
+        $aliases[] = "raw|{$label}|{$value}";
+
+        // 1. CORE SIGNAL (structuré)
+        $aliases[] = "core|{$group}|{$label}|{$value}|b{$boost}";
+
+        // 2. VALUE ONLY (signal brut)
+        if (strlen($value) > 3 && str_word_count($value) <= 6) {
+            $aliases[] = "val|{$label}|{$value}";
+        }
+
+        // 3. SYNONYMS (cached)
+        static $synonymCache = [];
+
+        $synonyms = $synonymCache[$label] ??= FieldSynonym::where('field_key', $label)
+            ->pluck('synonym')
+            ->toArray();
+
+        foreach (array_slice($synonyms, 0, 5) as $syn) {
+            $syn = $this->normalizeText($syn);
+            if ($syn === '') continue;
+            if (similar_text($syn, $value) > 80) continue; // anti redondance
+            $aliases[] = "syn|{$group}|{$label}|{$syn}";
+        }
+
+        $tokens = preg_split('/\s+/', strtolower($value));
+        foreach ($tokens as $t) {
+            if (strlen($t) > 2) {
+                $aliases[] = "tok|{$label}|{$t}";
+            }
+        }
+
+        return $aliases;
+    }
+    protected function getFieldGroup(string $field): string
+    {
+        return match ($field) {
+            'product_name', 'product_reference', 'product_category', 'description' => 'core',
+
+            'price', 'price_min', 'price_max', 'discount_price', 'currency' => 'pricing',
+
+            'brand', 'tags', 'keywords', 'features' => 'descriptive',
+
+            'stock_status', 'stock_quantity', 'availability', 'colors', 'materials' => 'logistics',
+
+            default => 'meta',
+        };
+    }
+    protected function getFieldBoost(string $field): int
+    {
+        return match ($field) {
+            'product_name' => 10,
+            'product_reference' => 9,
+            'product_category' => 8,
+
+            'price', 'discount_price' => 7,
+
+            'brand' => 8,
+            'keywords' => 7,
+            'features' => 6,
+
+            'availability' => 5,
+
+            default => 3,
+        };
     }
 }

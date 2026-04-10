@@ -11,6 +11,7 @@ use App\Services\chunks\ChunkRankingService;
 use App\Services\cta\ChatResponse;
 use App\Services\cta\CTAEngine;
 use App\Services\cta\CTARelevanceService;
+use App\Services\hybrid\HybridSearchService;
 use App\Services\queryAnalyzer\IntentRouter;
 use App\Services\queryAnalyzer\LeadService;
 use App\Services\queryAnalyzer\NavigationService;
@@ -18,6 +19,7 @@ use App\Services\queryAnalyzer\QueryAnalyzer;
 use App\Services\queryAnalyzer\TransactionService;
 use App\Services\rag\ContextCompressor;
 use App\Services\rag\ContextValidator;
+use App\Services\rag\LLMReRankerService;
 use App\Services\rag\RetrievalOptimizer;
 use App\Services\vector\VectorSearchService;
 use App\Traits\TextNormalizer;
@@ -83,7 +85,9 @@ class ChatService
         protected EntityExtractor $entityExtractor,
 
         protected EntityRelevanceService $entityRelevanceService,
-        protected CTARelevanceService $ctaRelevanceService
+        protected CTARelevanceService $ctaRelevanceService,
+        protected HybridSearchService $hybridSearchService,
+        protected LLMReRankerService $LLMReRankerService,
     )
     {}
 
@@ -196,12 +200,12 @@ class ChatService
 
             $embedding = $this->embeddingService->getEmbedding($q);
 
-            $partial = $this->vectorSearchService->search(
+            $partial = $this->hybridSearchService->search(
+                query: $q,
                 embedding: $embedding,
                 siteId: $site->id,
-                limit: $topK ?? $queryPlan->topK ?? 8,
+                limit: $queryPlan->topK ?? 8,
                 scoreThreshold: floatval($site->settings->min_similarity_score),
-                collection: "chunks_{$site->id}"
             );
 
             $results = array_merge($results, $partial);
@@ -221,6 +225,12 @@ class ChatService
         Log::info("Optimized Results", [
             "results" => $results
         ]);
+
+        $results = $this->LLMReRankerService->rerank(
+            query: $query,
+            chunks: $results,
+            topK: 12
+        );
 
         // ─────────────────────────────
         // 3️⃣ Recherche historique vectorielle
@@ -321,14 +331,16 @@ class ChatService
         // 7️⃣ Fusion + limite globale
         // ─────────────────────────────
         $allContextChunks = collect(array_merge($ragContextChunks, $ragContextMessages))
-            ->sortByDesc(fn($c) => $c['vector_score'] ?? 0)
+            //->sortByDesc(fn($c) => $c['vector_score'] ?? 0)
+            ->sortByDesc(fn($c) => $c['final_score'] ?? $c['score'] ?? 0)
             ->toArray();
         $maxChunks = 8; // chunks + messages
         $allContextChunks = array_slice($allContextChunks, 0, $maxChunks);
 
         // Construire le contexte final pour le LLM
-        $context = $this->contextCompressor->compress($allContextChunks, $site, $conversation);
-        Log::info("Compressed Context:", ['context' => $context]);
+        /*$context = $this->contextCompressor->compress($allContextChunks, $site, $conversation);
+        Log::info("Compressed Context:", ['context' => $context]);*/
+        $context = $this->contextBuilder->build($allContextChunks);
 
         if (trim($context) === '') {
             return new ChatResponse(
