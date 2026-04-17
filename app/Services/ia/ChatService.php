@@ -14,8 +14,10 @@ use App\Services\cta\CTARelevanceService;
 use App\Services\hybrid\HybridSearchService;
 use App\Services\queryAnalyzer\IntentRouter;
 use App\Services\queryAnalyzer\LeadService;
+use App\Services\queryAnalyzer\MultiHopPipelineService;
 use App\Services\queryAnalyzer\NavigationService;
 use App\Services\queryAnalyzer\QueryAnalyzer;
+use App\Services\queryAnalyzer\QueryPlan;
 use App\Services\queryAnalyzer\TransactionService;
 use App\Services\rag\ContextCompressor;
 use App\Services\rag\ContextSelectionService;
@@ -90,6 +92,8 @@ class ChatService
         protected HybridSearchService $hybridSearchService,
         protected LLMReRankerService $LLMReRankerService,
         protected ContextSelectionService $contextSelectionService,
+
+        protected MultiHopPipelineService $multiHopPipelineService,
     )
     {}
 
@@ -183,69 +187,70 @@ class ChatService
         ]);*/
 
         // ─────────────────────────────
-        // 2️⃣ Embedding
+        // 2️⃣ Retrieval (Single ou Multi-hop)
         // ─────────────────────────────
-        $resultsMap = [];
+        $hydrated = [];
+        if($this->multiHopPipelineService->shouldUseMultiHop(queryPlan: $queryPlan)){
+            Log::info("🚀 Multi-hop pipeline activated");
+            $hydrated = $this->multiHopPipelineService->handle(question: $question,queryPlan: $queryPlan,site: $site);
+        }else{
+            $resultsMap = [];
 
-        foreach ($queries as $q) {
+            foreach ($queries as $q) {
 
-            $embedding = $this->embeddingService->getEmbedding($q);
+                $embedding = $this->embeddingService->getEmbedding($q);
 
-            $partial = $this->hybridSearchService->search(
-                query: $q,
-                embedding: $embedding,
-                siteId: $site->id,
-                limit: $queryPlan->topK ?? 30,
-                scoreThreshold: floatval($site->settings->min_similarity_score),
-            );
+                $partial = $this->hybridSearchService->search(
+                    query: $q,
+                    embedding: $embedding,
+                    siteId: $site->id,
+                    limit: $queryPlan->topK ?? 30,
+                    scoreThreshold: floatval($site->settings->min_similarity_score),
+                );
 
-            foreach ($partial as $item) {
+                foreach ($partial as $item) {
 
-                $id = $item['id'];
+                    $id = $item['id'];
 
-                if (!isset($resultsMap[$id])) {
-                    $resultsMap[$id] = $item;
+                    if (!isset($resultsMap[$id])) {
+                        $resultsMap[$id] = $item;
 
-                    $resultsMap[$id]['hit_count'] = 0;
-                    $resultsMap[$id]['multi_query_score'] = 0;
+                        $resultsMap[$id]['hit_count'] = 0;
+                        $resultsMap[$id]['multi_query_score'] = 0;
+                    }
+
+                    // 🔥 count occurrences
+                    $resultsMap[$id]['hit_count']++;
+
+                    // 🔥 léger bonus par présence multi-query
+                    $resultsMap[$id]['multi_query_score'] += 1;
                 }
-
-                // 🔥 count occurrences
-                $resultsMap[$id]['hit_count']++;
-
-                // 🔥 léger bonus par présence multi-query
-                $resultsMap[$id]['multi_query_score'] += 1;
             }
+
+            $resultsHybridSearch = collect($resultsMap)
+                ->map(function ($item) {
+
+                    $hits = $item['hit_count'] ?? 1;
+
+                    $item['multi_query_bonus'] = min(0.15, log(1 + $hits) * 0.05);
+
+                    // 🔥 UPDATE GLOBAL SCORE
+                    $item['score'] = ($item['rrf_score'] ?? 0) + $item['multi_query_bonus'];
+
+                    return $item;
+                })
+                ->sortByDesc('score')
+                ->values()
+                ->toArray();
+            //Log::info("APRES RECHERCHE HYBRIDE APRES CLASSEMENT", $resultsHybridSearch);
+
+            // ─────────────────────────────
+            // 5️⃣ Hydratation
+            // ─────────────────────────────
+            $hydrated = $this->chunkHydrationService->hydrate($resultsHybridSearch);
+
         }
-
-        foreach ($resultsMap as &$item) {
-            $hits = $item['hit_count'];
-            // bonus logarithmique (très important pour éviter domination)
-            $item['multi_query_bonus'] = min(0.15, log(1 + $hits) * 0.05);
-        }
-
-        $resultsHybridSearch = collect($resultsMap)
-            ->map(function ($item) {
-
-                $hits = $item['hit_count'] ?? 1;
-
-                $item['multi_query_bonus'] = min(0.15, log(1 + $hits) * 0.05);
-
-                // 🔥 UPDATE GLOBAL SCORE
-                $item['score'] = ($item['rrf_score'] ?? 0) + $item['multi_query_bonus'];
-
-                return $item;
-            })
-            ->sortByDesc('score')
-            ->values()
-            ->toArray();
-        //Log::info("APRES RECHERCHE HYBRIDE APRES CLASSEMENT", $resultsHybridSearch);
-
-        // ─────────────────────────────
-        // 5️⃣ Hydratation
-        // ─────────────────────────────
-        $hydrated = $this->chunkHydrationService->hydrate($resultsHybridSearch);
-        //Log::info("Hydrated Chunks :", $hydrated);
+        Log::info("Hydrated Chunks :", $hydrated);
         $historyMessagesResults = [];
         $hydratedMessages = $this->chunkHydrationService->hydrateMessages($historyMessagesResults);
         //Log::info("Hydrated Messages :", $hydratedMessages);
@@ -335,6 +340,9 @@ class ChatService
 
         // Construire le contexte final pour le LLM
         $context = $this->contextBuilder->build($allContextChunks);
+        Log::info("CONTEXT BUILDER", [
+            'context' => $context
+        ]);
 
         if (trim($context) === '') {
             return new ChatResponse(
@@ -372,7 +380,7 @@ class ChatService
             entities: $entities
         );
 
-        //Log::info("Prompt Payload:", $promptPayload);
+        Log::info("Prompt Payload:", $promptPayload);
 
         // ─────────────────────────────
         // 9️⃣ Appel LLM
