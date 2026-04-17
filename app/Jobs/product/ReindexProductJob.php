@@ -3,6 +3,7 @@
 namespace App\Jobs\product;
 
 use App\Models\Document;
+use App\Models\Product;
 use App\Models\Site;
 use App\Services\product\ProductReindexService;
 use Illuminate\Bus\Queueable;
@@ -22,8 +23,7 @@ class ReindexProductJob implements ShouldQueue
 
     public function __construct(
         public string $siteId,
-        public string $documentId,
-        public int $productIndex,
+        public string $productId,
         public array $productData
     ) {}
 
@@ -31,20 +31,20 @@ class ReindexProductJob implements ShouldQueue
     {
         Log::info('[JOB REINDEX] Start', [
             'site_id' => $this->siteId,
-            'document_id' => $this->documentId,
-            'product_index' => $this->productIndex
+            'product_id' => $this->productId,
         ]);
 
-        $document = Document::find($this->documentId);
+        $product = Product::findOrFail($this->productId);
 
-        if (!$document) {
-            throw new \Exception("Document not found");
+        if (!$product) {
+            throw new \Exception("Product not found");
         }
 
+        $productUpdating = $this->normalize(product: $product, data: $this->productData);
+
         $productReindexService->reindexProduct(
-            $document,
-            $this->productIndex,
-            $this->productData
+            product: $productUpdating,
+            productData: $this->productData
         );
 
         // ✅ Si on arrive ici = succès
@@ -68,5 +68,69 @@ class ReindexProductJob implements ShouldQueue
 
         Site::where('id', $this->siteId)
             ->update(['status' => 'error']);
+    }
+
+    protected function normalize(Product $product, array $data): Product
+    {
+        $product->update([
+            'product_name' => $this->clean($data['product_name'] ?? null),
+            'product_reference' => $data['product_reference'] ?? null,
+            'product_type' => $data['product_type'] ?? null,
+            'product_category' => $data['product_category'] ?? null,
+            'description' => $data['description'] ?? null,
+
+            'price' => $this->toFloat($data['price'] ?? null),
+            'currency' => strtoupper($data['currency'] ?? 'MAD'),
+
+            'price_min' => $this->toFloat($data['price_min'] ?? null),
+            'price_max' => $this->toFloat($data['price_max'] ?? null),
+            'discount_price' => $this->toFloat($data['discount_price'] ?? null),
+            'tax_rate' => $this->toFloat($data['tax_rate'] ?? null),
+
+            'short_description' => $data['short_description'] ?? null,
+            'features' => $data['features'] ?? null,
+            'brand' => $data['brand'] ?? null,
+            'tags' => $this->toJson($data['tags'] ?? null),
+            'keywords' => $this->toJson($data['keywords'] ?? null),
+
+            'stock_status' => $data['stock_status'] ?? null,
+            'stock_quantity' => (int) ($data['stock_quantity'] ?? 0),
+
+            'weight' => $data['weight'] ?? null,
+            'dimensions' => $data['dimensions'] ?? null,
+            'colors' => $data['colors'] ?? null,
+            'materials' => $data['materials'] ?? null,
+            'availability' => $data['availability'] ?? null,
+
+            'image_url' => $data['image_url'] ?? null,
+            'product_url' => $data['product_url'] ?? null,
+            'gallery_urls' => $this->toJson($data['gallery_urls'] ?? null),
+            'video_url' => $data['video_url'] ?? null,
+
+            'status' => $data['status'] ?? 'active',
+            'language' => $data['language'] ?? 'fr',
+            'visibility' => $data['visibility'] ?? 'public',
+            'created_in_website_at' => $data['created_at'] ?? null,
+        ]);
+        return $product;
+    }
+    protected function clean($value)
+    {
+        return $value ? trim($value) : null;
+    }
+    protected function toFloat($value)
+    {
+        if (!$value) return null;
+        return (float) str_replace(',', '.', $value);
+    }
+    protected function toJson($value)
+    {
+        if (!$value) return null;
+
+        if (is_array($value)) {
+            return json_encode($value);
+        }
+
+        return json_encode(array_map('trim', explode(',', $value)));
     }
 }

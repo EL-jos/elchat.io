@@ -55,6 +55,7 @@ class VectorSearchService
                     'search_params' => [
                         'hnsw_ef' => 128
                     ],
+                    'with_vector' => true, // 🔥 IMPORTANT
                     /*'filter' => [
                         'must' => [
                             [

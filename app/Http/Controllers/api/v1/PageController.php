@@ -9,6 +9,7 @@ use App\Models\Chunk;
 use App\Models\Document;
 use App\Models\Page;
 use App\Models\Site;
+use App\Services\lexical\LexicalIndexService;
 use App\Services\vector\VectorIndexService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
@@ -22,7 +23,7 @@ class PageController extends Controller
     /**
      * Remove the specified resource from storage.
      */
-    public function destroy(Page $page, VectorIndexService $vectorIndexService)
+    public function destroy(Page $page, VectorIndexService $vectorIndexService, LexicalIndexService $lexicalIndexService)
     {
 
         DB::transaction(function () use (&$page, &$vectorIndexService) {
@@ -30,7 +31,6 @@ class PageController extends Controller
 
             // 1️⃣ Récupérer les chunks liés
             $chunkIds = $page->chunks()->pluck('id')->toArray();
-            dd($page->site_id, $chunkIds);
 
             // 2️⃣ Supprimer les vecteurs dans Qdrant (non bloquant)
             $vectorIndexService->deleteChunksBatch($chunkIds, "chunks_{$page->site_id}");
@@ -48,7 +48,7 @@ class PageController extends Controller
         ]);
     }
 
-    public function destroyMultiple(Request $request, VectorIndexService $vectorIndexService)
+    public function destroyMultiple(Request $request, VectorIndexService $vectorIndexService, LexicalIndexService $lexicalIndexService)
     {
         $ids = $request->input('ids', []);
 
@@ -61,7 +61,7 @@ class PageController extends Controller
         $page = Page::where('id', $ids[0])->first();
         $site = $page->site;
 
-        DB::transaction(function () use ($ids, $vectorIndexService, &$site) {
+        DB::transaction(function () use ($ids, $vectorIndexService, $lexicalIndexService, &$site) {
 
             // 1️⃣ Récupérer toutes les pages
             $pages = Page::whereIn('id', $ids)->get();
@@ -78,8 +78,9 @@ class PageController extends Controller
             Chunk::whereIn('page_id', $ids)->delete();
 
             // 5️⃣ Supprimer les vecteurs après commit
-            DB::afterCommit(function () use ($chunkIds, $vectorIndexService, &$site) {
+            DB::afterCommit(function () use ($chunkIds, $vectorIndexService, $lexicalIndexService, &$site) {
                 $vectorIndexService->deleteChunksBatch($chunkIds, "chunks_{$site->id}");
+                $lexicalIndexService->deleteChunksBatch(chunkIds: $chunkIds, siteId: $site->id);
             });
 
         });

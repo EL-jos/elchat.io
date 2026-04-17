@@ -8,6 +8,7 @@ use App\Models\Page;
 use App\Models\Site;
 use App\Services\CrawlService;
 use App\Services\IndexService;
+use App\Services\lexical\LexicalIndexService;
 use App\Services\vector\VectorIndexService;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -34,7 +35,7 @@ class CrawlPageBatchJob implements ShouldQueue
         $this->urls = $urls;
     }
 
-    public function handle(CrawlService $crawlService, IndexService $indexService, VectorIndexService $vectorIndexService)
+    public function handle(CrawlService $crawlService, IndexService $indexService, VectorIndexService $vectorIndexService, LexicalIndexService $lexicalIndexService)
     {
         $site = Site::findOrFail($this->siteId);
 
@@ -66,6 +67,7 @@ class CrawlPageBatchJob implements ShouldQueue
 
                     if (!empty($chunkIds)) {
                         $vectorIndexService->deleteChunksBatch($chunkIds, collection: "chunks_{$site->id}");
+                        $lexicalIndexService->deleteChunksBatch(chunkIds: $chunkIds, siteId: $site->id);
                         Chunk::whereIn('id', $chunkIds)->delete();
                     }
 
@@ -73,12 +75,24 @@ class CrawlPageBatchJob implements ShouldQueue
                 }
 
                 $page = $crawlService->crawlSinglePage($site, $url, 0, $crawlJob->id);
+                Log::warning("AGE CREEE", [
+                    'age' => $page->id,
+                    'title' => $page->title
+                ]);
 
                 if ($page) {
+                    Log::warning("DEBUT DE L'INDEXATION DE LA AGE CREEE", [
+                        'age' => $page->id,
+                        'title' => $page->title
+                    ]);
                     // Index uniquement les pages
                     $indexService->indexPage($page, [
                         'source' => 'crawl',
                         'site_id' => $site->id,
+                    ]);
+                    Log::warning("FIN DE L'INDEXATION DE LA AGE CREEE", [
+                        'age' => $page->id,
+                        'title' => $page->title
                     ]);
                 }
 

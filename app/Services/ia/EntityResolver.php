@@ -23,9 +23,9 @@ class EntityResolver
             $sourceType = $chunk['source_type'] ?? null;
 
             // --- PRODUITS WOOCOMMERCE ---
-            if ($sourceType === 'woocommerce' && isset($metadata['product_index'])) {
+            if ($sourceType === 'woocommerce' && isset($metadata['product_id'])) {
 
-                $entityKey = 'product_' . $metadata['product_index'];
+                $entityKey = 'product_' . $metadata['product_id'];
                 if (in_array($entityKey, $processedEntities)) {
                     continue;
                 }
@@ -37,14 +37,13 @@ class EntityResolver
                     continue;
                 }
 
-                $documentId = $originalChunk->document_id;
+                $productId = $originalChunk->product_id;
 
-                $allChunks = Chunk::where('document_id', $documentId)
+                $allChunks = Chunk::where('product_id', $productId)
                     ->where('source_type', 'woocommerce')
-                    ->where('metadata->product_index', $metadata['product_index'])
                     ->get();
 
-                $globalChunk = $allChunks->first(fn($c) => ($c->metadata['type'] ?? null) === 'global');
+                $globalChunk = $allChunks->first(fn($c) => ($c->metadata['type'] ?? null) === 'section');
 
                 if ($globalChunk) {
                     $raw = $globalChunk->metadata['raw'] ?? [];
@@ -82,29 +81,16 @@ class EntityResolver
                         ],
                         'priority' => $globalChunk->priority,
                         'vector_score' => $chunk['vector_score'] ?? null,
+                        'keyword_score' => $chunk['keyword_score'] ?? null,
                         'final_score' => $chunk['final_score'] ?? null,
+                        'ranking_score' => $chunk['ranking_score'] ?? null,
+                        'relevance_score' => $chunk['relevance_score'] ?? null,
                     ]);
                 } else {
                     $combinedText = $allChunks->pluck('text')->implode('. ');
                     $chunk['text'] = $combinedText;
                     $resolved->push($chunk);
                 }
-
-                /*if ($globalChunk) {
-                    $resolved->push([
-                        'id' => $globalChunk->id,
-                        'text' => $globalChunk->text,
-                        'source_type' => $globalChunk->source_type,
-                        'metadata' => $globalChunk->metadata,
-                        'priority' => $globalChunk->priority,
-                        'vector_score' => $chunk['vector_score'] ?? null,
-                        'final_score' => $chunk['final_score'] ?? null,
-                    ]);
-                } else {
-                    $combinedText = $allChunks->pluck('text')->implode('. ');
-                    $chunk['text'] = $combinedText;
-                    $resolved->push($chunk);
-                }*/
 
                 continue;
             }

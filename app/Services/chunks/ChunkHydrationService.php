@@ -11,15 +11,15 @@ class ChunkHydrationService
     /**
      * Hydrate les résultats Qdrant avec MySQL
      */
-    public function hydrate(array $qdrantResults): array
+    public function hydrate(array $results): array
     {
-        //Log::info("resultat QDRANT", $qdrantResults);
-        if (empty($qdrantResults)) {
+        //Log::info("resultat QDRANT", $results);
+        if (empty($results)) {
             return [];
         }
 
         // 1️⃣ Extraire les IDs Qdrant
-        $ids = collect($qdrantResults)
+        $ids = collect($results)
             ->pluck('id')
             ->filter()
             ->values()
@@ -37,7 +37,7 @@ class ChunkHydrationService
         // 3️⃣ Fusion Qdrant + MySQL
         $hydrated = [];
 
-        foreach ($qdrantResults as $result) {
+        foreach ($results as $result) {
             $chunk = $chunks->get($result['id']);
             if (!$chunk) continue;
 
@@ -56,19 +56,31 @@ class ChunkHydrationService
                 $textContent = $chunk->text;
             }
 
+            if (strlen($textContent) < 30 && $chunk->source_type !== 'woocommerce') {
+                continue;
+            }
+
+            if (($chunk->metadata['type'] ?? null) === 'statistical_alias') {
+                continue;
+            }
+
             $hydrated[] = [
                 'id' => $chunk->id,
-                'text' => $textContent,
                 // 🔥 SIGNALS
-                'vector_score' => $result['score'] ?? 0.0,
+                'score' => $result['score'],
                 'rrf_score' => $result['rrf_score'] ?? null, // si dispo
+                'vector_score' => $result['vector_score'] ?? 0.0,
                 'keyword_score' => $result['keyword_score'] ?? null,
-                'llm_score' => $result['llm_score'] ?? null,
+                'multi_query_bonus' => $result['multi_query_bonus'] ?? null,
                 // meta
+                'text' => $textContent,
                 'priority' => $chunk->priority ?? 100,
                 'source_type' => $chunk->source_type ?? 'unknown',
                 'metadata' => $chunk->metadata,
+                'payload' => $result['payload'] ?? null,
+                'source' => $result['source'] ?? null,
                 'length' => strlen($textContent),
+                'embedding' => $result['embedding'] ?? null,
             ];
 
             /*Log::info('Hydrated chunk text', [
@@ -114,6 +126,7 @@ class ChunkHydrationService
                 'id'           => $message->id,
                 'text'         => $message->content,
                 'vector_score' => $result['score'] ?? 0.0,
+                'type'         => 'message',
                 'role'         => $message->role,
                 'metadata'     => [
                     'created_at' => $message->created_at,

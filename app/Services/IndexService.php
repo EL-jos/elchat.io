@@ -5,6 +5,7 @@ use App\Models\Chunk;
 use App\Models\Document;
 use App\Models\FieldSynonym;
 use App\Models\Page;
+use App\Models\Product;
 use App\Services\ia\EmbeddingService;
 use App\Services\lexical\LexicalIndexService;
 use App\Services\vector\VectorIndexService;
@@ -24,8 +25,14 @@ class IndexService
     ) {}
     public function indexPage(Page $page, array $context = []): void
     {
+        Log::info("DANS INDEX PAGES");
+
         // 🛑 Idempotence  : ne jamais réindexer
         if ($page->is_indexed) {
+            Log::info("DANS INDEX PAGES deja indexée ", [
+                'page_id' => $page->id,
+                'page_title' => $page->title,
+            ]);
             return;
         }
 
@@ -34,11 +41,19 @@ class IndexService
         try {
             $chunks = $this->buildChunks($page);
 
+            Log::info("CHUNKS", [
+                'chunk' => $chunks,
+            ]);
+
             $this->lexicalIndexService->ensureIndex($page->site_id);
 
             foreach ($chunks as $i => $chunkData) {
                 $textChunk = $chunkData['text'];
                 $priority  = $chunkData['priority'];
+
+                Log::info("DANS INDEX PAGES contenu du chunk: ", [
+                    'text chunk' => $textChunk,
+                ]);
 
 
                 if ($this->chunkAlreadyExists($page, $textChunk)) continue;
@@ -121,14 +136,24 @@ class IndexService
         // Cas 1 : contenu structuré (JSON depuis CrawlService B)
         $decoded = json_decode($page->content, true);
 
+        Log::info("DANS BUILD CHUNKS ", [
+            'decoded' => $decoded,
+            'page_id' => $page->id,
+            'page_title' => $page->title,
+        ]);
+
         if (is_array($decoded)) {
+            Log::info("EST UN TABLEAU  ");
+            if (isset($decoded['sections'])) {
+                $decoded = $decoded['sections'];
+            }
             return $this->buildChunksFromSections($page, $decoded);
         }
-
+        Log::info("EST UN TEXTE NORAL ");
         // Cas 2 : contenu brut (fallback robuste)
         return $this->buildChunksFromRawText($page);
     }
-    protected function buildChunksFromSections(Page $page, array $sections): array
+    /*protected function buildChunksFromSections(Page $page, array $sections): array
     {
         $chunks = [];
 
@@ -172,6 +197,235 @@ class IndexService
         }
 
         return $chunks;
+    }*/
+    protected function buildChunksFromSections(Page $page, array $sections): array
+    {
+        Log::info("DANS BUILD CHUNKS FRO SECTIONS ");
+        $chunks = [];
+
+        $buffer = '';
+        $bufferMeta = [
+            'h1' => null,
+            'h2' => null,
+            'h3' => null,
+            'weight' => 1, // 🔥 AJOUT
+        ];
+
+        foreach ($sections as $i => $section) {
+
+            Log::info("SECTION CONCERNEE ", [
+                'section' => $section,
+                'content' => trim($section['content'] ?? '')
+            ]);
+
+            $content = trim($section['content'] ?? '');
+            if ($content === '') continue;
+
+            $h1 = trim($section['h1'] ?? '');
+            $h2 = trim($section['h2'] ?? '');
+            $h3 = trim($section['h3'] ?? '');
+
+            // 🔥 Update contexte seulement si pertinent
+            if ($h1) $bufferMeta['h1'] = $h1;
+            if ($h2) $bufferMeta['h2'] = $h2;
+            if ($h3) $bufferMeta['h3'] = $h3;
+
+            if (isset($section['weight'])) {
+                $bufferMeta['weight'] = max(
+                    $bufferMeta['weight'] ?? 1,
+                    $section['weight']
+                );
+            }
+
+            // 🔥 Ajout au buffer
+            $buffer .= "\n" . $content;
+
+            $buffer = trim($buffer);
+
+            Log::info("BUFFER AVANT SHOULD FLUSH BUFFER ", [
+                'buffer' => $buffer,
+            ]);
+
+            // 🔥 flush intelligent
+            if ($this->shouldFlushBuffer($buffer, $content, $i, $sections)) {
+
+                $chunks = array_merge(
+                    $chunks,
+                    $this->createSmartChunks($page, $buffer, $bufferMeta)
+                );
+
+                Log::info("flush intelligent ", [
+                    'chunks' => $chunks,
+                ]);
+
+                $buffer = '';
+                $bufferMeta = [
+                    'h1' => null,
+                    'h2' => null,
+                    'h3' => null,
+                    'weight' => 1, // 🔥 important
+                ];
+            }
+        }
+
+        // flush final
+        if (trim($buffer) !== '') {
+            Log::info("BUFFER ", [
+                'buffer' => $buffer,
+            ]);
+            $chunks = array_merge(
+                $chunks,
+                $this->createSmartChunks($page, $buffer, $bufferMeta)
+            );
+        }
+
+        Log::info("SECTION CONCERNEE SORTIE ", [
+            'buffer' => $buffer,
+            'chunks' => $chunks
+        ]);
+
+        // 🔥 DEDUP GLOBAL FINAL (CRUCIAL)
+        return $this->deduplicateChunks($chunks, $page);
+    }
+    protected function createSmartChunks(Page $page, string $buffer, array $meta): array
+    {
+
+        Log::info("DANS CREATE SART CHUNKS ");
+        $header = implode("\n", array_filter([
+            $page->title ? "Page: {$page->title}" : null,
+            $meta['h1'] ?? null,
+            $meta['h2'] ?? null,
+            $meta['h3'] ?? null,
+            "URL: {$page->url}",
+        ]));
+
+        //$text = $header . "\n\n" . $buffer;
+        $context = implode("\n", array_filter([
+            $meta['h1'] ?? null,
+            $meta['h2'] ?? null,
+            $meta['h3'] ?? null,
+        ]));
+
+        $text = implode("\n\n", array_filter([
+            $page->title ? "Page: {$page->title}" : null,
+            $context ? "Context: {$context}" : null,
+            "Content:\n{$buffer}",
+        ]));
+
+        $chunks = [];
+
+        foreach ($this->chunkBySentences($text, 800, 1) as $chunkText) {
+
+            $semantic = $this->computeSemanticPriority($chunkText, 'section', $meta['h2'] ?? null);
+            $weight = $meta['weight'] ?? 1;
+
+            $priority = (int) round($semantic * (0.7 + 0.3 * $weight));
+
+            $chunks[] = [
+                'text' => $chunkText,
+                'priority' => $priority,
+                // 🔥 IMPORTANT
+                'no_embedding' => $meta['no_embedding'] ?? false,
+                'type' => ($meta['h2'] ?? '') === 'Overview' ? 'overview' : 'section',
+            ];
+
+            Log::info("CHUNKS COUURE ", [
+                'chunks' => $chunks,
+            ]);
+
+        }
+
+        return $chunks;
+    }
+    protected function shouldFlushBuffer(string $buffer, string $current, int $i, array $sections): bool
+    {
+        $total = count($sections);
+
+        Log::info("DANS SHOULD FLUSH BUFFER ", [
+            'buffer' => $buffer,
+            'current' => $current,
+            'i' => $i,
+            'sections' => $sections,
+            'total' => $total,
+        ]);
+
+        // 🔥 PRIORITÉ MAX : changement de bloc logique
+        if ($i < $total - 1) {
+
+            $next = $sections[$i + 1];
+            $currentH3 = $sections[$i]['h3'] ?? null;
+            $nextH3 = $next['h3'] ?? null;
+            // 🔴 CAS 1 : les deux ont h3 → flush si différent
+            if ($currentH3 !== null && $nextH3 !== null && $currentH3 !== $nextH3) {
+                Log::info("CAS 1 : les deux ont h3 → flush si différent");
+                return true;
+            }
+            // 🔴 CAS 2 : un a h3 et l'autre non → flush aussi
+            if (($currentH3 === null && $nextH3 !== null) || ($currentH3 !== null && $nextH3 === null)) {
+                Log::info("CAS 2 : un a h3 et l'autre non → flush aussi");
+                return true;
+            }
+
+        }
+
+        // trop petit → continue
+        if (mb_strlen($buffer) < 500) {
+            Log::info("trop petit → continue");
+            return false;
+        }
+
+        // trop grand → flush
+        if (mb_strlen($buffer) > 1200) {
+            Log::info("trop grand → flush");
+            return true;
+        }
+
+        // changement de logique (h2 change)
+        if ($i < $total - 1) {
+            $next = $sections[$i + 1] ?? null;
+
+            if ($next && ($next['h2'] ?? null) !== ($sections[$i]['h2'] ?? null)) {
+                Log::info("changement de logique (h2 change)");
+                return true;
+            }
+        }
+
+        Log::info("RIEN DE TOUT CA ");
+
+        return false;
+    }
+    protected function deduplicateChunks(array $chunks, Page $page): array
+    {
+        Log::info("DANS DEDULICATECHUNKS ", [
+            'chunks' => $chunks,
+            'page_id' => $page->id,
+            'age_title' => $page->title,
+        ]);
+        $seen = [];
+        $final = [];
+
+        foreach ($chunks as $chunk) {
+
+            $fingerprint = hash('sha256',
+                $page->id . '|' .
+                preg_replace('/\s+/', ' ', strtolower($chunk['text']))
+            );
+
+            if (isset($seen[$fingerprint])) {
+                continue;
+            }
+
+            $seen[$fingerprint] = true;
+
+            $final[] = $chunk;
+        }
+
+        Log::info("SORTIE DE  DEDULICATECHUNKS ", [
+            'seen' => $seen,
+            'final' => $final,
+        ]);
+
+        return $final;
     }
     protected function buildChunksFromRawText(Page $page): array
     {
@@ -184,7 +438,7 @@ class IndexService
         ]));
 
         $chunks = [];
-        foreach ($this->chunkBySentences($header . "\n\n" . $text, 800, 120) as $chunkText) {
+        foreach ($this->chunkBySentences($header . "\n\n" . $text, 800, 1) as $chunkText) {
             $chunks[] = [
                 'text' => $chunkText,
                 'priority' => 50, // fallback priority neutre
@@ -193,27 +447,185 @@ class IndexService
 
         return $chunks;
     }
-    protected function chunkBySentences(string $text, int $maxChars, int $overlapChars): array
+    /*protected function chunkBySentences(string $text, int $maxChars, int $overlapSentences = 1): array
     {
+        if (substr_count($text, '.') < 2 && mb_strlen($text) > 300) {
+            return $this->chunkText($text, 120, 0.2);
+        }
+
         $sentences = preg_split('/(?<=[.!?])\s+/', $text);
+
         if (!$sentences || count($sentences) === 0) {
             return [trim($text)];
         }
-        $chunks    = [];
-        $buffer    = '';
+
+        $chunks = [];
+        $buffer = [];
 
         foreach ($sentences as $sentence) {
-            if (mb_strlen($buffer . ' ' . $sentence) <= $maxChars) {
-                $buffer .= ' ' . $sentence;
+
+            // 🔥 phrase trop longue
+            if (mb_strlen($sentence) > $maxChars) {
+                if (!empty($buffer)) {
+                    $chunks[] = implode(' ', $buffer);
+                    $buffer = [];
+                }
+
+                $chunks = array_merge($chunks, $this->chunkText($sentence, 120, 0.2));
+                continue;
+            }
+
+            $testBuffer = implode(' ', [...$buffer, $sentence]);
+
+            if (mb_strlen($testBuffer) <= $maxChars) {
+                $buffer[] = $sentence;
             } else {
-                $chunks[] = trim($buffer);
-                $buffer = mb_substr($buffer, -$overlapChars) . ' ' . $sentence;
+                if (!empty($buffer)) {
+                    $chunks[] = implode(' ', $buffer);
+                }
+
+                $buffer = array_slice($buffer, -$overlapSentences);
+                $buffer[] = $sentence;
             }
         }
 
-        if (mb_strlen($buffer) > 0) {
-            $chunks[] = trim($buffer);
+        if (!empty($buffer)) {
+            $chunks[] = implode(' ', $buffer);
         }
+
+        return $chunks;
+    }*/
+    protected function chunkBySentences(string $text, int $maxChars, int $overlapSentences = 1): array
+    {
+        Log::info('CHUNK_START', [
+            'text_length' => mb_strlen($text),
+            'maxChars' => $maxChars,
+            'overlapSentences' => $overlapSentences,
+        ]);
+
+        // 🔥 fallback si peu de phrases
+        if (substr_count($text, '.') < 2 && mb_strlen($text) > 300) {
+            Log::info('CHUNK_FALLBACK_TRIGGERED', [
+                'reason' => 'not_enough_sentences',
+                'dot_count' => substr_count($text, '.'),
+            ]);
+
+            return $this->chunkText($text, 120, 0.2);
+        }
+
+        $sentences = preg_split('/(?<=[.!?])\s+/', $text);
+        $sentences = array_map('trim', $sentences);
+        $sentences = array_filter($sentences);
+
+        Log::info('CHUNK_SENTENCES_SPLIT', [
+            'count' => count($sentences),
+            'sentences_preview' => array_slice($sentences, 0, 5),
+        ]);
+
+        if (!$sentences || count($sentences) === 0) {
+            Log::warning('CHUNK_EMPTY_SENTENCES', [
+                'text_preview' => mb_substr($text, 0, 200),
+            ]);
+            return [trim($text)];
+        }
+
+        $chunks = [];
+        $buffer = [];
+
+        foreach ($sentences as $index => $sentence) {
+
+            Log::debug('CHUNK_SENTENCE_PROCESSING', [
+                'index' => $index,
+                'sentence_length' => mb_strlen($sentence),
+                'sentence_preview' => mb_substr($sentence, 0, 100),
+            ]);
+
+            // 🔥 phrase trop longue
+            if (mb_strlen($sentence) > $maxChars) {
+
+                Log::warning('CHUNK_LONG_SENTENCE', [
+                    'index' => $index,
+                    'length' => mb_strlen($sentence),
+                ]);
+
+                if (!empty($buffer)) {
+                    $chunkText = implode(' ', $buffer);
+
+                    Log::info('CHUNK_FLUSH_BEFORE_LONG_SENTENCE', [
+                        'chunk_length' => mb_strlen($chunkText),
+                        'chunk_preview' => mb_substr($chunkText, 0, 150),
+                    ]);
+
+                    $chunks[] = $chunkText;
+                    $buffer = [];
+                }
+
+                $splitChunks = $this->chunkText($sentence, 120, 0.2);
+
+                Log::info('CHUNK_LONG_SENTENCE_SPLIT', [
+                    'resulting_chunks' => count($splitChunks),
+                ]);
+
+                $chunks = array_merge($chunks, $splitChunks);
+                continue;
+            }
+
+            $testBuffer = implode(' ', [...$buffer, $sentence]);
+
+            if (mb_strlen($testBuffer) <= $maxChars) {
+
+                Log::debug('CHUNK_BUFFER_APPEND', [
+                    'new_length' => mb_strlen($testBuffer),
+                ]);
+
+                $buffer[] = $sentence;
+
+            } else {
+
+                Log::info('CHUNK_FLUSH_MAX_REACHED', [
+                    'buffer_length' => mb_strlen(implode(' ', $buffer)),
+                    'next_sentence_length' => mb_strlen($sentence),
+                ]);
+
+                if (!empty($buffer)) {
+                    $chunkText = implode(' ', $buffer);
+
+                    Log::info('CHUNK_CREATED', [
+                        'chunk_length' => mb_strlen($chunkText),
+                        'chunk_preview' => mb_substr($chunkText, 0, 150),
+                    ]);
+
+                    $chunks[] = $chunkText;
+                }
+
+                // 🔁 overlap
+                $overlap = array_slice($buffer, -$overlapSentences);
+
+                Log::debug('CHUNK_OVERLAP_APPLIED', [
+                    'overlap_count' => count($overlap),
+                    'overlap_preview' => implode(' ', $overlap),
+                ]);
+
+                $buffer = $overlap;
+                $buffer[] = $sentence;
+            }
+        }
+
+        // 🔚 flush final
+        if (!empty($buffer)) {
+            $chunkText = implode(' ', $buffer);
+
+            Log::info('CHUNK_FINAL_FLUSH', [
+                'chunk_length' => mb_strlen($chunkText),
+                'chunk_preview' => mb_substr($chunkText, 0, 150),
+            ]);
+
+            $chunks[] = $chunkText;
+        }
+
+        Log::info('CHUNK_END', [
+            'total_chunks' => count($chunks),
+        ]);
 
         return $chunks;
     }
@@ -298,7 +710,7 @@ class IndexService
                 $priority  = $chunkData['priority'];
                 $metadata  = $chunkData['metadata'];
 
-                if ($this->chunkAlreadyExistsForDocument($document, $textChunk)) {
+                if ($this->chunkAlreadyExistsForDocument(siteId: $siteId, text: $textChunk)) {
                     continue;
                 }
 
@@ -441,14 +853,14 @@ class IndexService
 
         return $chunks;
     }
-    protected function chunkAlreadyExistsForDocument(Document $document, string $text, ?string $productId = null): bool
+    protected function chunkAlreadyExistsForDocument(string $siteId, string $text, ?string $productId = null): bool
     {
         //$hash = sha1($text);
         //$hash = sha1($text . ($identifier ?? ''));
 
         $hash = hash('sha256', $text . ($productId ?? ''));
 
-        $query = Chunk::where('site_id', $document->documentable->id)
+        $query = Chunk::where('site_id', $siteId)
             ->where('hash', $hash);
 
         if ($productId !== null) {
@@ -513,47 +925,63 @@ class IndexService
     /**
      * Indexe un produit standard dans un document
      */
-    public function indexStandardProduct(array $product, Document $document, int $priority): void
+    public function indexStandardProduct(Product  $product, Document $document, int $priority = 0): void
     {
+
         $productIndex = $priority + 1;
 
-        $identifier = $product['identifier'] ?? $product['product_name'] ?? $product['product_reference'] ?? 'unknown-product';
-        $productId = hash('sha256', $identifier);
+        $identifier = $product->product_name ?? $product->product_reference ?? 'unknown-product';
+        $productId = $product->id; // 🔥 clé réelle
 
         Log::info('Indexation produit démarrée', [
             'document_id'   => $document->id,
             'product_index' => $productIndex,
             'identifier'    => $identifier,
+            'product_id'    => $product->id,
         ]);
 
         // 🔹 Vérifie si le produit a déjà été indexé avec CE document
-        $alreadyIndexedWithDocument = Chunk::where('source_type', 'woocommerce')
-            ->where('document_id', $document->id)
-            ->where('metadata->identifier', $identifier)
-            ->exists();
+        $alreadyIndexedWithDocument = null;
+        if ($document !== null) {
+            $alreadyIndexedWithDocument = Chunk::where('source_type', 'woocommerce')
+                ->where('document_id', $document->id)
+                ->where('metadata->product_id', $product->id)
+                ->where('metadata->identifier', $identifier)
+                ->exists();
+        }
 
         if ($alreadyIndexedWithDocument) {
             Log::info("Produit déjà indexé avec ce document, on passe", [
                 'document_id' => $document->id,
                 'identifier' => $identifier,
+                'product_id'    => $product->id,
             ]);
             return; // NE RIEN FAIRE
         }
 
         // 🔹 Si c'est un nouveau document et que le produit existe déjà avec un autre document
-        $existingChunks = Chunk::where('source_type', 'woocommerce')
+        $query = Chunk::where('source_type', 'woocommerce')
             ->where('metadata->identifier', $identifier)
-            ->where('document_id', '<>', $document->id)
-            ->get();
+            ->where('metadata->product_id', $product->id);
+
+        if ($document) {
+            $query->where('document_id', '<>', $document->id);
+        }
+
+        $existingChunks = $query->get();
 
         if ($existingChunks->isNotEmpty()) {
             $chunkIds = $existingChunks->pluck('id')->all();
-            $this->vectorIndexService->deleteChunksBatch($chunkIds, collection: "chunks_{$document->documentable->id}");
-            Chunk::whereIn('id', $chunkIds)->delete();
+
+            $this->vectorIndexService->deleteChunksBatch($chunkIds, collection: "chunks_{$product->site_id}");
+            $this->lexicalIndexService->deleteChunksBatch($chunkIds, siteId: $product->site_id);
+            //Chunk::whereIn('id', $chunkIds)->delete();
+            Chunk::where('product_id', $product->id)->delete();
 
             Log::info('Ancien produit supprimé pour nouveau document', [
                 'document_id' => $document->id,
                 'identifier' => $identifier,
+                'product_id'    => $product->id,
                 'chunks_deleted' => count($chunkIds),
             ]);
         }
@@ -571,9 +999,9 @@ class IndexService
             // 🔹 Fake Page pour réutiliser ton pipeline existant
             $page = new Page([
                 'id' => (string) Str::uuid(),
-                'site_id' => $document->documentable->id,
-                'title' => $product['product_name'] ?? 'Produit',
-                'url' => $product['product_url'] ?? null,
+                'site_id' => $product->site_id,
+                'title' => $product->product_name ?? 'Produit',
+                'url' => $product->product_url ?? null,
                 'content' => json_encode($structured),
                 'source' => 'product',
             ]);
@@ -582,14 +1010,14 @@ class IndexService
 
             $splitValues = fn(string $value): array => array_filter(array_map('trim', preg_split('/[,;|]/', trim($value))));
 
-            $this->lexicalIndexService->ensureIndex($document->documentable->id);
+            $this->lexicalIndexService->ensureIndex($product->site_id);
             // 🔹 Sauvegarde + embeddings
             foreach ($chunks as $chunkData) {
                 $textChunk = $chunkData['text'];
                 $priority  = $chunkData['priority'];
 
                 if (trim($textChunk) === '') continue;
-                if ($this->chunkAlreadyExistsForDocument($document, $textChunk, $productId)) continue;
+                if ($this->chunkAlreadyExistsForDocument(siteId: $product->site_id, text: $textChunk, productId: $productId)) continue;
 
                 try {
                     //$embedding = $this->embeddingService->getEmbedding($textChunk);
@@ -601,6 +1029,7 @@ class IndexService
                 } catch (\Throwable $e) {
                     Log::warning("Embedding échoué (section produit)", [
                         'document_id' => $document->id,
+                        'product_id' => $product->id,
                         'preview' => mb_substr($textChunk, 0, 100),
                     ]);
                     continue;
@@ -609,7 +1038,8 @@ class IndexService
                 $hash = hash('sha256', $textChunk . $productId);
                 $chunk = Chunk::create([
                     'document_id' => $document->id,
-                    'site_id'     => $document->documentable->id,
+                    'product_id'  => $product->id,
+                    'site_id'     => $product->site_id,
                     'source_type' => 'woocommerce',
                     'text'        => $textChunk,
                     'priority'    => $priority,
@@ -625,7 +1055,7 @@ class IndexService
 
                 $aliasesMap = [];
 
-                foreach ($product as $field => $value) {
+                foreach ($product->toIndexableArray() as $field => $value) {
                     if (!$value) continue;
 
                     foreach ($splitValues($value) as $v) {
@@ -642,6 +1072,8 @@ class IndexService
                 $this->lexicalIndexService->upsertChunk([
                     'id' => (string) $chunk->id,
                     'site_id' => $chunk->site_id,
+                    'product_id'  => $productId,
+                    'document_id' => $chunk->document_id,
                     'source_type' => $chunk->source_type,
                     'text' => $chunk->text,
                     'content' => $chunk->text, // 🔥 duplication stratégique
@@ -673,7 +1105,7 @@ class IndexService
             // 🔹 2️⃣ Chunks granulaires avec alias et synonymes
             //$splitValues = fn(string $value): array => array_filter(array_map('trim', preg_split('/[,;|]/', trim($value))));
 
-            foreach ($product as $field => $value) {
+            foreach ($product->toIndexableArray() as $field => $value) {
                 if (!$value) continue;
 
                 foreach ($splitValues($value) as $v) {
@@ -684,26 +1116,28 @@ class IndexService
                     foreach ($aliases as $aliasText) {
                         if (strlen($aliasText) < 3) continue;
                         if (str_word_count($aliasText) === 1 && strlen($aliasText) < 4) continue;
-                        if ($this->chunkAlreadyExistsForDocument($document, $aliasText, $productId)) continue;
+                        if ($this->chunkAlreadyExistsForDocument(siteId: $product->site_id, text: $aliasText, productId: $productId)) continue;
 
-                        try {
+                        /*try {
                             if (trim($aliasText) === '') continue;
                             $embedding = $this->embeddingService->getEmbedding($aliasText);
                         } catch (\Throwable $e) {
                             Log::warning("Embedding échoué pour chunk produit", [
                                 'document_id' => $document->id,
                                 'product_index' => $productIndex,
+                                'product_id'  => $productId,
                                 'chunk_preview' => mb_substr($aliasText, 0, 100),
                                 'error' => $e->getMessage(),
                             ]);
                             continue;
-                        }
+                        }*/
 
                         $hash = hash('sha256', $aliasText . $productId);
 
-                        $chunk = Chunk::create([
+                        Chunk::create([
                             'document_id' => $document->id,
-                            'site_id'     => $document->documentable->id,
+                            'product_id'  => $productId,
+                            'site_id'     => $product->site_id,
                             'source_type' => 'woocommerce',
                             'text'        => $aliasText,
                             'priority'    => $this->computeSemanticPriority(
@@ -722,9 +1156,9 @@ class IndexService
                             'hash' => $hash,
                         ]);
 
-                        if ($chunk) {
+                        /*if ($chunk) {
                             $this->vectorIndexService->upsertChunk(
-                                siteId: $document->documentable->id,
+                                siteId: $product->site_id,
                                 chunkId: $chunk->id,
                                 embedding: $embedding,
                                 payload: [
@@ -739,15 +1173,18 @@ class IndexService
                                 ],
                                 collection: "chunks_{$chunk->site_id}"
                             );
-                        }
+                        }*/
                     }
                 }
             }
+
+            $page->delete();
 
             DB::commit();
 
             Log::info('Produit indexé avec succès', [
                 'document_id'    => $document->id,
+                'product_id'     => $product->id,
                 'product_index'  => $productIndex,
                 'identifier'     => $identifier,
                 'chunks_created' => count($chunks),
@@ -805,14 +1242,14 @@ class IndexService
 
         return array_unique($aliases);
     }
-    protected function productToSections(array $product): array
+    protected function productToSections(Product $product): array
     {
         $sections = [];
         $identifier = $product['identifier'] ?? $product['product_name'] ?? $product['product_reference'] ?? 'unknown-product';
 
         $h1 = $product['product_name'] ?? 'Produit';
 
-        foreach ($product as $field => $value) {
+        foreach ($product->toIndexableArray() as $field => $value) {
             if (!$value) continue;
 
             $values = is_array($value)
@@ -861,11 +1298,11 @@ class IndexService
             default => 1,
         };
     }
-    protected function buildProductOverview(array $product): string
+    protected function buildProductOverview(Product $product): string
     {
         $parts = [];
 
-        foreach ($product as $key => $value) {
+        foreach ($product->toIndexableArray() as $key => $value) {
             if (!$value) continue;
 
             if (is_array($value)) {

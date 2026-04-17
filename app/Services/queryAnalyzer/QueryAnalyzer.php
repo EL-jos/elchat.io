@@ -38,7 +38,7 @@ class QueryAnalyzer
                 "query_type" => "factual",
                 "needs_conversation_context" => false,
                 "filters" => [],
-                "top_k" => 5,
+                "top_k" => 30,
                 "search_strategy" => "single"
             ];
         }
@@ -113,7 +113,7 @@ class QueryAnalyzer
             "other": {}
           },
 
-          "top_k": 8,
+          "top_k": 30,
 
           "search_strategy": "single | multi_query | decomposition"
         }
@@ -233,7 +233,7 @@ class QueryAnalyzer
             ? $data['filters']
             : [];
 
-        $plan->topK = intval($data['top_k'] ?? 5);
+        $plan->topK = intval($data['top_k'] ?? 30);
 
         $plan->searchStrategy = $data['search_strategy'] ?? 'single';
 
@@ -332,7 +332,7 @@ class QueryAnalyzer
             "query_type" => "factual",
             "needs_conversation_context" => false,
             "filters" => [],
-            "top_k" => 5,
+            "top_k" => 30,
             "search_strategy" => "single"
         ]);
     }

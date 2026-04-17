@@ -8,70 +8,94 @@ use App\Models\Document;
 use App\Models\ProductImport;
 use App\Models\Site;
 use Illuminate\Contracts\Queue\ShouldQueue;
+use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Foundation\Queue\Queueable;
+use Illuminate\Queue\InteractsWithQueue;
+use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
 
 class ProductImportJob implements ShouldQueue
 {
-    use Queueable;
+    use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    /**
-     * Create a new job instance.
-     */
+    public $timeout = 600;
+
     public function __construct(
         public Document $document,
-        public $mapping,
+        public array $mapping,
         public Site $site
-    )
-    {
-        //
-    }
+    ) {}
 
-    /**
-     * Execute the job.
-     */
     public function handle()
     {
-        $productsRaw = ProductFileParser::parse($this->document);
+        Log::info("🚀 ProductImportJob démarré pour site {$this->site->id}");
 
-        $products = ProductMapper::map($productsRaw, $this->mapping);
+        $this->site->update(['status' => 'indexing']);
 
-        if (empty($products)) {
-            Log::warning("Aucun produit trouvé pour document {$this->document->id}");
-            $this->site->update(['status' => 'ready']);
-            return;
+        try {
+            // 🔹 1. Parse fichier
+            $rows = ProductFileParser::parse($this->document);
+
+            if (empty($rows)) {
+                Log::warning("⚠️ Aucun produit trouvé");
+                $this->site->update(['status' => 'ready']);
+                return;
+            }
+
+            // 🔹 2. Mapping
+            $products = ProductMapper::map($rows, $this->mapping);
+
+            if (empty($products)) {
+                Log::warning("⚠️ Mapping vide");
+                $this->site->update(['status' => 'ready']);
+                return;
+            }
+
+            // 🔹 3. Empêcher double import
+            $existing = ProductImport::where('document_id', $this->document->id)
+                ->where('status', 'processing')
+                ->first();
+
+            if ($existing) {
+                Log::warning("⚠️ Import déjà en cours pour ce document");
+                return;
+            }
+
+            // 🔹 4. Création import (TRACKING)
+            $import = ProductImport::create([
+                'site_id' => $this->site->id,
+                'document_id' => $this->document->id,
+                'total_products' => count($products),
+                'processed_products' => 0,
+                'status' => 'processing',
+                'started_at' => now()
+            ]);
+
+            // 🔹 5. Dispatch batchs
+            collect($products)
+                ->chunk(100)
+                ->each(function ($batch) use ($import) {
+
+                    IndexProductBatchJob::dispatch(
+                        $batch->toArray(),
+                        $this->document,
+                        $import->id,
+                        $import->site->id,
+                    );
+                });
+
+            // 🔹 6. Check async completion
+            CheckProductImportCompletionJob::dispatch($import->id)
+                ->delay(now()->addSeconds(30));
+
+            Log::info("📦 Import lancé avec ID {$import->id}");
+
+        } catch (\Throwable $e) {
+            $this->site->update(['status' => 'error']);
+
+            Log::error("❌ ProductImportJob échoué: {$e->getMessage()}");
+
+            throw $e;
         }
-
-        $existing = ProductImport::where('document_id', $this->document->id)
-            ->where('status', 'processing')
-            ->first();
-
-        if ($existing) {
-            return;
-        }
-
-        $import = ProductImport::create([
-            'site_id' => $this->site->id,
-            'document_id' => $this->document->id,
-            'total_products' => count($products),
-            'processed_products' => 0,
-            'status' => 'processing',
-            'started_at' => now()
-        ]);
-
-        // Dispatch des batches
-        collect($products)
-            ->chunk(100) // 🔥 batch size configurable
-            ->each(function ($batch) use ($import) {
-                IndexProductBatchJob::dispatch(
-                    $batch,
-                    $this->document,
-                    $import->id
-                );
-            });
-
-        // Vérification périodique
-        CheckProductImportCompletionJob::dispatch($import->id)->delay(now()->addSeconds(30));
-
     }
 }

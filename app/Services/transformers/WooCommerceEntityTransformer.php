@@ -3,6 +3,9 @@
 namespace App\Services\transformers;
 
 use App\Interfaces\EntityTransformer;
+use App\Models\Chunk;
+use App\Models\Product;
+use Illuminate\Support\Str;
 
 class WooCommerceEntityTransformer implements EntityTransformer
 {
@@ -13,18 +16,20 @@ class WooCommerceEntityTransformer implements EntityTransformer
 
     public function transform(array $chunk): ?array
     {
-        $raw = $chunk['metadata']['raw'] ?? null;
+        $chunk = Chunk::find($chunk['id']);
+        if (!$chunk) return null;
 
-        if (!$raw) return null;
+        $product = Product::find($chunk->product_id);
+        if (!$product) return null;
 
         return [
-            'id' => $chunk['id'],
+            'id' => $product->id,
             'type' => 'product',
-            'title' => $raw['product_name'] ?? null,
-            'description' => $raw['description'] ?? null, // 🔥 IMPORTANT
-            'url' => $raw['product_url'] ?? null,
-            'image' => $raw['image_url'] ?? null,
-            'price' => $raw['price'] ?? null,
+            'title' => $product->product_name,
+            'description' => Str::limit(($product->short_description ?? $product->description ?? "Unknown"), 100), // 🔥 IMPORTANT
+            'url' => $product->product_url ?? null,
+            'image' => $product->image_url ?? null,
+            'price' => $product->price ?? null,
         ];
     }
 }

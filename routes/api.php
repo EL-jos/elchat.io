@@ -69,7 +69,9 @@ Route::prefix('v1')->group(function () {
         Route::apiResource('ai_role', AIRoleController::class);
         Route::controller(ChunkController::class)->group(function () {
             Route::get('chunk/{site}/products', 'indexProducts');
-            Route::post('chunk/product/{site}/{document_id}/{product_index}/reindex', 'reindexProduct');
+            Route::post('chunk/product/{site}/{product_id}/reindex', 'reindexProduct');
+            Route::delete('site/{site}/product/{product_id}', 'deleteProduct');
+            Route::delete('site/{site}/products', 'deleteProducts');
         });
         Route::controller(PageController::class)->group(function () {
             Route::post("/pages/{page}/recrawl", "recrawl");

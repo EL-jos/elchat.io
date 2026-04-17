@@ -9,11 +9,55 @@ use Illuminate\Http\Client\RequestException;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
+use Symfony\Component\BrowserKit\HttpBrowser;
 use Symfony\Component\DomCrawler\Crawler;
 use Symfony\Component\HttpClient\HttpClient;
 use Throwable;
 
 class CrawlService {
+    public function prepareQueue(Site $site): array
+    {
+        $queue = [];
+        $visited = [];
+
+        $baseUrl  = rtrim($site->url, '/') . '/';
+        $baseHost = parse_url($baseUrl, PHP_URL_HOST);
+
+        if (!empty($site->include_pages)) {
+            foreach ($site->include_pages as $path) {
+                $queue[] = [
+                    'url'   => $this->resolveUrl($path, $baseUrl),
+                    'depth' => 0,
+                ];
+            }
+        } else {
+            $queue[] = ['url' => $baseUrl, 'depth' => 0];
+        }
+
+        $allUrls = [];
+
+        while ($queue) {
+            $current = array_shift($queue);
+            $url     = $this->normalizeUrl($current['url']);
+            $depth   = $current['depth'];
+
+            if (!$url || $depth > $site->crawl_depth) continue;
+            if (in_array($url, $visited, true)) continue;
+
+            if ($this->isExcluded($url, $site)) continue;
+
+            $visited[] = $url;
+            $allUrls[] = ['url' => $url, 'depth' => $depth];
+
+            foreach ($this->extractInternalLinks($url, $baseHost, $site) as $link) {
+                if (!in_array($link, $visited, true)) {
+                    $queue[] = ['url' => $link, 'depth' => $depth + 1];
+                }
+            }
+        }
+
+        return $allUrls;
+    }
     public function crawlSinglePage(
         Site $site,
         string $url,
@@ -1007,5 +1051,37 @@ EOT,
             ],
             'rag_text' => $context ?: "Informations fournies par {$companyName}"
         ], JSON_UNESCAPED_UNICODE);
+    }
+
+    private function extractInternalLinks(string $url, string $baseHost, Site $site): array
+    {
+        $links = [];
+
+        try {
+            $client = new HttpBrowser(HttpClient::create(['timeout' => 30]));
+            $client->request('GET', $url);
+            $crawler = $client->getCrawler();
+
+            $crawler->filter('a[href]')->each(function (Crawler $node) use (&$links, $baseHost, $site) {
+                $href = trim($node->attr('href'));
+                if (!$href || preg_match('/^(#|mailto|tel|javascript|data):/i', $href)) return;
+
+                $abs = $this->resolveUrl($href, rtrim($site->url, '/') . '/');
+                if (!$abs) return;
+
+                if (parse_url($abs, PHP_URL_HOST) !== $baseHost) return;
+
+                $norm = $this->normalizeUrl($abs);
+                if ($this->isExcluded($norm, $site)) return;
+
+                if (!in_array($norm, $links, true)) {
+                    $links[] = $norm;
+                }
+            });
+        } catch (\Throwable $e) {
+            Log::warning("Link extraction failed {$url}");
+        }
+
+        return $links;
     }
 }

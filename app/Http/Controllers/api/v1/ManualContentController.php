@@ -69,8 +69,8 @@ class ManualContentController extends Controller
             'url' => null,
             'content' => $processed['content'],
             'plain_text' => $processed['plain_text'],
-            'type' => $processed['type'] ?? 'custom',
-            'importance' => $processed['importance'] ?? 2.5,
+            //'type' => $processed['type'] ?? 'custom',
+            //'importance' => $processed['importance'] ?? 2.5,
             'is_indexed' => false,
         ]);
 

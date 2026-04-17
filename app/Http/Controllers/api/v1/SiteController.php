@@ -13,6 +13,7 @@ use App\Models\Site;
 use App\Models\WidgetSetting;
 use App\Services\CrawlService;
 use App\Services\IndexService;
+use App\Services\lexical\LexicalIndexService;
 use App\Services\vector\VectorCreationService;
 use App\Services\vector\VectorIndexService;
 use Illuminate\Http\JsonResponse;
@@ -42,7 +43,7 @@ class SiteController extends Controller
     /**
      * Créer un nouveau site
      */
-    public function store(Request $request, VectorCreationService $vectorService)
+    public function store(Request $request, VectorCreationService $vectorService, LexicalIndexService $lexicalIndexService)
     {
         $validated = $request->validate([
             'url' => 'required|url',
@@ -75,12 +76,24 @@ class SiteController extends Controller
             collection: "chunks_{$site->id}"
         );
 
-        if (!$collectionCreated) {
+        $indexCreated = $lexicalIndexService->createIndexIfNotExists(siteId: $site->id);
+
+        if (!$collectionCreated || !$indexCreated) {
             // Optionnel : marquer le site en erreur
             $site->update(['status' => 'error']);
 
+            $message = 'Site créé mais erreur : ';
+
+            if (!$collectionCreated) {
+                $message .= 'collection vectorielle ';
+            }
+
+            if (!$indexCreated) {
+                $message .= 'index lexical ';
+            }
+
             return response()->json([
-                'message' => 'Site créé mais erreur lors de la création de la collection vectorielle.',
+                'message' => $message,
                 'site' => $site
             ], 500);
         }
@@ -135,7 +148,7 @@ class SiteController extends Controller
     /**
      * Supprimer un site
      */
-    public function destroy($id, VectorIndexService $indexService)
+    public function destroy($id, VectorIndexService $indexService, LexicalIndexService $lexicalIndexService)
     {
         /**
          * @var Site $site
@@ -147,6 +160,7 @@ class SiteController extends Controller
 
         $site->chunks()->delete();
         $indexService->deleteCollection("chunks_{$site->id}");
+        $lexicalIndexService->deleteIndex($site->id);
         $site->crawlJobs()->delete();
         $site->pages()->delete();
         $site->conversations()->delete();

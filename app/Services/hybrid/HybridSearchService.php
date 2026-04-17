@@ -4,6 +4,7 @@ namespace App\Services\hybrid;
 
 use App\Services\lexical\LexicalIndexService;
 use App\Services\vector\VectorSearchService;
+use Illuminate\Support\Facades\Log;
 
 class HybridSearchService
 {
@@ -28,7 +29,7 @@ class HybridSearchService
         $vectorResults = $this->vectorSearch->search(
             embedding: $embedding,
             siteId: $siteId,
-            limit: 30,
+            limit: $limit,
             scoreThreshold: $scoreThreshold,
             collection: $collection,
         );
@@ -39,10 +40,14 @@ class HybridSearchService
             ->toArray();
 
         $keywordResults = $this->lexicalSearch->search(
-            $query,
-            $siteId,
-            30
+            query: $query,
+            siteId: $siteId,
+            limit: $limit
         );
+
+        /*Log::info("RESULTAT LEXICAL", [
+            'keywords' => $keywordResults,
+        ]);*/
 
         $keywordResults = collect($keywordResults)
             ->unique('id')
@@ -70,15 +75,17 @@ class HybridSearchService
 
         // 3️⃣ RRF Fusion
         //$fused = $this->reciprocalRankFusion($rankedLists);
+        /*Log::info("SOURCES DE LA RECHERCHE", [
+            "rankedLists" => $rankedLists,
+        ]);*/
         $fused = $this->reciprocalRankFusionWeighted($rankedLists);
 
         // 4️⃣ Hydratation minimale (ids uniquement)
         return collect($fused)
-            ->take($limit)
+            //->take($limit)
             ->values()
             ->toArray();
     }
-
     /**
      * Transforme résultats en ranking pur
      */
@@ -92,7 +99,6 @@ class HybridSearchService
             ])
             ->toArray();
     }
-
     /**
      * 🔥 RRF core
      */
@@ -126,6 +132,7 @@ class HybridSearchService
     protected function reciprocalRankFusionWeighted(array $sources): array
     {
         $scores = [];
+
         // 🔥 maps pour récupérer metadata
         $vectorMap = collect();
         $keywordMap = collect();
@@ -151,40 +158,65 @@ class HybridSearchService
                     $scores[$id] = 0;
                 }
 
-                $scores[$id] += $weight * (1 / ($this->rrfK + $rank));
+                $rrf = $weight * (1 / ($this->rrfK + $rank));
+
+                $vectorScore = $vectorMap[$id]['score'] ?? 0;
+                $keywordScore = $keywordMap[$id]['score'] ?? 0;
+
+                // 🔥 NORMALISATION SIMPLE
+                $vectorNorm = $vectorScore; // déjà 0-1
+                $maxKeyword = $keywordMap->max('score') ?: 1;
+                $keywordNorm = $keywordScore / $maxKeyword;
+
+                // 🔥 HYBRID BOOST
+                $scoreContribution =
+                    $rrf +
+                    (0.15 * $vectorNorm) +
+                    (0.15 * $keywordNorm);
+
+                $scores[$id] += $scoreContribution;
             }
         }
 
+        /*Log::info("Dans reciprocalRankFusionWeighted", [
+            "sources" => $sources,
+            "scores" => $scores,
+            "vectorMap" => $vectorMap,
+            "keywordMap" => $keywordMap,
+        ]);*/
+
         // 🔥 ENRICHISSEMENT FINAL
         return collect($scores)
-        ->map(function ($score, $id) use ($vectorMap, $keywordMap) {
+            ->map(function ($score, $id) use ($vectorMap, $keywordMap) {
 
-            if ($vectorMap->has($id) && $keywordMap->has($id)) {
-                $score += 0.1;
-            }
+                if ($vectorMap->has($id) && $keywordMap->has($id)) {
+                    $score += 0.1;
+                    //$score *= 1.15;
+                }
 
-            return [
-                'id' => $id,
-                'score' => $score,
-
-                // 🔥 CRITIQUE pour ton pipeline
-                'vector_score' => $vectorMap[$id]['score'] ?? null,
-                'keyword_score' => $keywordMap[$id]['score'] ?? null,
-
-                // 🔥 nécessaire pour hydration / ranking
-                'payload' => $vectorMap[$id]['payload']
+                return [
+                    'id' => $id,
+                    // 🔥 score initial = RRF enrichi
+                    'score' => $score,
+                    // 🔥 trace immutable
+                    'rrf_score' => $score,
+                    // 🔥 CRITIQUE pour ton pipeline
+                    'vector_score' => $vectorMap[$id]['score'] ?? null,
+                    'keyword_score' => $keywordMap[$id]['score'] ?? null,
+                    // 🔥 nécessaire pour hydration / ranking
+                    'payload' => $vectorMap[$id]['payload']
                         ?? $keywordMap[$id]['payload']
-                        ?? null,
-
-                'source' => $vectorMap->has($id) && $keywordMap->has($id)
-                    ? 'hybrid'
-                    : ($vectorMap->has($id) ? 'vector' : 'keyword'),
-            ];
-        })
-        ->filter(fn($item) => $item['score'] > 0.01)
-        ->sortByDesc('score')
-        ->values()
-        ->toArray();
+                            ?? ['id' => $id],
+                    'source' => $vectorMap->has($id) && $keywordMap->has($id)
+                        ? 'hybrid'
+                        : ($vectorMap->has($id) ? 'vector' : 'keyword'),
+                    'embedding' => $vectorMap[$id]['vector'] ?? null,
+                ];
+            })
+            //->filter(fn($item) => $item['score'] > 0.01)
+            ->sortByDesc('score')
+            ->values()
+            ->toArray();
     }
     protected function getWeights(string $query): array
     {

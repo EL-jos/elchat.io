@@ -152,6 +152,7 @@ class CrawlService {
                 ], JSON_UNESCAPED_UNICODE),
                 'plain_text' => $this->buildPlainText($sections),
                 'source'       => 'crawl',
+                'is_indexed' => false,
             ]);
 
         } catch (Throwable $e) {

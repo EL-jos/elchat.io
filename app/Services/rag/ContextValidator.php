@@ -4,48 +4,76 @@ namespace App\Services\rag;
 
 use App\Services\ia\EmbeddingService;
 use App\Services\queryAnalyzer\QueryPlan;
+use Illuminate\Support\Facades\Log;
 
 class ContextValidator
 {
-
     public function validate(array $chunks, QueryPlan $queryPlan): bool
     {
         if (empty($chunks)) return false;
 
         $entities = $this->normalizeEntities($queryPlan->entities ?? []);
-        if (empty($entities)) $entities[] = $queryPlan->cleanQuery;
+        if (empty($entities)) {
+            $entities[] = strtolower($queryPlan->cleanQuery);
+        }
 
         $relevantChunks = 0;
-        $threshold = min(0.5, max(0.35, strlen($queryPlan->cleanQuery)/200));
 
         foreach ($chunks as $chunk) {
-            $sim = $this->semanticSimilarity($chunk['text'], $queryPlan->cleanQuery);
 
-            // bonus si chunk contient une entité de la query
+            if (strlen($chunk['text']) < 50) continue;
+
+            $llm = $chunk['llm_score'] ?? null;
+            $final = $chunk['final_score'] ?? null;
+            $retrieval = $chunk['score'] ?? 0;
+
+            // 🔥 1. LLM = vérité absolue
+            if (is_numeric($llm) && $llm >= 0.8) {
+                return true;
+            }
+
+            // 🔥 2. fallback SI PAS DE LLM
+            if (!is_numeric($llm) && is_numeric($final) && $final >= 0.75) {
+                return true;
+            }
+
+            // 🔥 3. base score hiérarchique
+            $baseScore = $chunk['final_score']
+                ?? $chunk['llm_score']
+                ?? $chunk['retrieval_score']
+                ?? 0;
+
+            // 🔥 entity bonus calibré
             $entityBonus = 0;
             foreach ($entities as $e) {
-                if (stripos($chunk['text'], $e) !== false) {
-                    $entityBonus = 0.15;
+                if (str_contains(
+                    strtolower($chunk['text']),
+                    trim(strtolower($e))
+                )) {
+                    $entityBonus = 0.10;
                     break;
                 }
             }
 
-            if (($sim + $entityBonus) >= $threshold) {
+            $totalScore = $baseScore + $entityBonus;
+
+            $threshold = 0.55;
+
+            if ($totalScore >= $threshold) {
                 $relevantChunks++;
             }
+
+            Log::info("Validator debug (final)", [
+                "llm" => $llm,
+                "baseScore" => $baseScore,
+                "entityBonus" => $entityBonus,
+                "total" => $totalScore,
+                "threshold" => $threshold,
+                "text" => substr($chunk['text'], 0, 100)
+            ]);
         }
 
-        // au moins 3 chunks pertinents ou la moitié des chunks disponibles
-        return $relevantChunks >= min(3, ceil(count($chunks)/2));
-    }
-
-    private function tokenize(string $query): array
-    {
-        $query = strtolower($query);
-
-        return array_filter(
-            preg_split('/[\s,.;:!?()]+/', $query)
-        );
+        return $relevantChunks >= max(1, ceil(count($chunks) * 0.3));
     }
 
     private function normalizeEntities(array $entities): array
@@ -53,43 +81,13 @@ class ContextValidator
         $normalized = [];
 
         foreach ($entities as $entity) {
-
-            if (is_string($entity)) {
-                $normalized[] = $entity;
-            }
-
-            if (is_array($entity)) {
-                foreach ($entity as $value) {
-                    if (is_string($value)) {
-                        $normalized[] = $value;
-                    }
-                }
+            if (is_array($entity) && isset($entity['value'])) {
+                $normalized[] = strtolower($entity['value']);
+            } elseif (is_string($entity)) {
+                $normalized[] = strtolower($entity);
             }
         }
 
         return $normalized;
-    }
-
-    /**
-     * Calcule la similarité cosinus entre le texte du chunk et la question
-     */
-    public function semanticSimilarity(string $text, string $query): float
-    {
-        // Récupérer les embeddings
-        $textEmbedding = app()->make(EmbeddingService::class)->getEmbedding($text);
-        $queryEmbedding = app()->make(EmbeddingService::class)->getEmbedding($query);
-
-        // Calcul cosinus
-        $dot = 0.0;
-        $normText = 0.0;
-        $normQuery = 0.0;
-
-        foreach ($textEmbedding as $i => $v) {
-            $dot += $v * $queryEmbedding[$i];
-            $normText += $v * $v;
-            $normQuery += $queryEmbedding[$i] * $queryEmbedding[$i];
-        }
-
-        return $dot / (sqrt($normText) * sqrt($normQuery) + 1e-10); // +epsilon pour éviter div0
     }
 }

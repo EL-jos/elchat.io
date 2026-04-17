@@ -4,24 +4,29 @@ namespace App\Services\product;
 
 use App\Models\Chunk;
 use App\Models\Document;
+use App\Models\Product;
+use App\Models\Site;
 use App\Services\IndexService;
+use App\Services\lexical\LexicalIndexService;
 use App\Services\vector\VectorIndexService;
 use App\Services\vector\VectorSearchService;
 use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
 class ProductReindexService
 {
     public function __construct(
         protected IndexService $indexService,
-        protected VectorIndexService $vectorIndexService
+        protected VectorIndexService $vectorIndexService,
+        protected LexicalIndexService  $lexicalIndexService,
     ) {}
     /**
      * Liste paginée des produits (chunks globaux uniquement)
      */
-    public function listProducts(
+    /*public function listProducts(
         string $siteId,
         int $page = 1,
         int $perPage = 20,
@@ -75,15 +80,86 @@ class ProductReindexService
         ]);
 
         return $paginator;
+    }*/
+    public function listProducts(
+        string $siteId,
+        int $page = 1,
+        int $perPage = 20,
+        ?string $search = null
+    ): LengthAwarePaginator {
+
+        Log::info('[PRODUCT LIST] Start', [
+            'site_id' => $siteId,
+            'page' => $page,
+            'per_page' => $perPage,
+            'search' => $search
+        ]);
+
+        $query = Product::query()
+            ->where('site_id', $siteId);
+
+        // 🔎 Recherche
+        if (!empty($search)) {
+            $search = strtolower(trim($search));
+
+            $query->where(function ($q) use ($search) {
+                $q->whereRaw('LOWER(product_name) LIKE ?', ["%{$search}%"])
+                    ->orWhereRaw('LOWER(product_reference) LIKE ?', ["%{$search}%"])
+                    ->orWhereRaw('LOWER(description) LIKE ?', ["%{$search}%"])
+                    ->orWhereRaw('LOWER(short_description) LIKE ?', ["%{$search}%"])
+                    ->orWhereRaw('LOWER(brand) LIKE ?', ["%{$search}%"])
+                    ->orWhereRaw('LOWER(tags) LIKE ?', ["%{$search}%"])
+                    ->orWhereRaw('LOWER(keywords) LIKE ?', ["%{$search}%"]);
+            });
+        }
+
+        $paginator = $query
+            ->orderBy('created_at', 'desc')
+            ->paginate($perPage, ['*'], 'page', $page);
+
+        // 🔥 Transformation (optionnelle)
+        /*$paginator->getCollection()->transform(function ($product) {
+
+            return [
+                'product_id' => $product->id,
+                'identifier' => $product->product_reference ?? $product->product_name,
+
+                'fields' => [
+                    'name' => [$product->product_name],
+                    'description' => [$product->description],
+                    'short_description' => [$product->short_description],
+                    'brand' => [$product->brand],
+                    'category' => [$product->product_category],
+                    'features' => $this->explodeIfJson($product->features),
+                    'colors' => $this->explodeIfJson($product->colors),
+                    'materials' => $this->explodeIfJson($product->materials),
+                    'tags' => $this->explodeIfJson($product->tags),
+                ],
+
+                'content' => array_values(array_filter([
+                    $product->product_name,
+                    $product->description,
+                    $product->short_description,
+                    $product->features,
+                    $product->brand,
+                    $product->product_category
+                ]))
+            ];
+        });*/
+
+        Log::info('[PRODUCT LIST] End', [
+            'total' => $paginator->total()
+        ]);
+
+        return $paginator;
     }
     /**
      * Réindexe un produit spécifique
      */
-    public function reindexProduct(Document $document, int $productIndex, array $productData): array
+    public function reindexProduct(Product $product, array $productData): array
     {
         Log::info('[PRODUCT REINDEX] Démarrage', [
-            'document_id'   => $document->id,
-            'product_index' => $productIndex
+            '$product_id'   => $product->id,
         ]);
 
         DB::beginTransaction();
@@ -96,26 +172,29 @@ class ProductReindexService
             |--------------------------------------------------------------------------
             */
 
-            $oldChunks = Chunk::where('document_id', $document->id)
-                ->where('source_type', 'woocommerce')
-                ->where('metadata->product_index', $productIndex)
-                ->get();
+            $oldChunks = Chunk::where('product_id', $product->id)
+                ->where('site_id', $product->site_id)
+                ->pluck('id')
+                ->all();
 
             Log::info('[PRODUCT REINDEX] Anciens chunks trouvés', [
-                'count' => $oldChunks->count()
+                'count' => count($oldChunks)
             ]);
 
             /*
             |--------------------------------------------------------------------------
-            | 2️⃣ Suppression Vector DB
+            | 2️⃣ Suppression Vector DB & Lexical DB
             |--------------------------------------------------------------------------
             */
 
-            foreach ($oldChunks as $chunk) {
-                $this->vectorIndexService->deleteChunk($chunk->id);
-            }
+            Log::info("ID's anciens chunks", [
+                "chunks old" => $oldChunks
+            ]);
 
-            Log::info('[PRODUCT REINDEX] Suppression Qdrant OK');
+            $this->vectorIndexService->deleteChunksBatch(chunkIds: $oldChunks, collection: "chunks_{$product->site_id}");
+            $this->lexicalIndexService->deleteChunksBatch(chunkIds: $oldChunks, siteId: $product->site_id);
+
+            Log::info('[PRODUCT REINDEX] Suppression Qdrant et Meilisearch OK');
 
             /*
             |--------------------------------------------------------------------------
@@ -123,9 +202,11 @@ class ProductReindexService
             |--------------------------------------------------------------------------
             */
 
-            Chunk::where('document_id', $document->id)
+            $site = Site::find($product->site_id);
+
+            Chunk::where('product_id', $product->id)
                 ->where('source_type', 'woocommerce')
-                ->where('metadata->product_index', $productIndex)
+                ->where('site_id', $site->id)
                 ->delete();
 
             Log::info('[PRODUCT REINDEX] Suppression MySQL OK');
@@ -136,10 +217,13 @@ class ProductReindexService
             |--------------------------------------------------------------------------
             */
 
+            $document = new Document([ 'id' => (string) Str::uuid(), 'path' => "unknown", 'type' => "other", 'extension' => "unknown"]);
+            $document = $site->documents()->save($document);
+
             $this->indexService->indexStandardProduct(
-                $productData,
-                $document,
-                $productIndex - 1
+                product: $product,
+                document: $document,
+                priority: 50
             );
 
             Log::info('[PRODUCT REINDEX] Reconstruction terminée');
@@ -150,10 +234,10 @@ class ProductReindexService
             |--------------------------------------------------------------------------
             */
 
-            $globalChunk = Chunk::where('document_id', $document->id)
+            $globalChunk = Chunk::where('product_id', $product->id)
                 ->where('source_type', 'woocommerce')
-                ->where('metadata->product_index', $productIndex)
-                ->where('metadata->type', 'global')
+                ->where('metadata->type', 'section')
+                ->where('site_id', $product->site_id)
                 ->first();
 
             if (!$globalChunk) {
@@ -163,8 +247,8 @@ class ProductReindexService
             DB::commit();
 
             Log::info('[PRODUCT REINDEX] Succès', [
-                'document_id' => $document->id,
-                'product_index' => $productIndex
+                'product_id' => $product->id,
+                'product_index' => 50
             ]);
 
             return [
@@ -172,8 +256,8 @@ class ProductReindexService
                 'message' => 'Produit réindexé avec succès',
                 'data' => [
                     'document_id'   => $document->id,
-                    'product_index' => $productIndex,
-                    'identifier'    => $globalChunk->metadata['identifier'] ?? null,
+                    'product_index' => 50,
+                    'product_id'    => $product->id,
                     'global_text'   => $globalChunk->text,
                     'fields'        => $globalChunk->metadata['raw'] ?? [],
                 ]
@@ -184,8 +268,8 @@ class ProductReindexService
             DB::rollBack();
 
             Log::error('[PRODUCT REINDEX] ÉCHEC', [
-                'document_id' => $document->id,
-                'product_index' => $productIndex,
+                'product_id' => $product->id,
+                'product_index' => 50,
                 'error' => $e->getMessage()
             ]);
 
@@ -203,7 +287,7 @@ class ProductReindexService
      * @param array|int $productIndices  Ex: 3 ou [1,2,3]
      * @param array $productsData        Ex: [1 => [...], 2 => [...]]
      */
-    public function reindexProducts(Document $document, array|int $productIndices, array $productsData = []): array
+    /*public function reindexProducts(Document $document, array|int $productIndices, array $productsData = []): array
     {
         $productIndices = is_array($productIndices) ? $productIndices : [$productIndices];
         $results = [];
@@ -291,5 +375,5 @@ class ProductReindexService
         }
 
         return $results;
-    }
+    }*/
 }

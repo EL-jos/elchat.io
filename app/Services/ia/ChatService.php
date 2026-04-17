@@ -18,6 +18,7 @@ use App\Services\queryAnalyzer\NavigationService;
 use App\Services\queryAnalyzer\QueryAnalyzer;
 use App\Services\queryAnalyzer\TransactionService;
 use App\Services\rag\ContextCompressor;
+use App\Services\rag\ContextSelectionService;
 use App\Services\rag\ContextValidator;
 use App\Services\rag\LLMReRankerService;
 use App\Services\rag\RetrievalOptimizer;
@@ -88,6 +89,7 @@ class ChatService
         protected CTARelevanceService $ctaRelevanceService,
         protected HybridSearchService $hybridSearchService,
         protected LLMReRankerService $LLMReRankerService,
+        protected ContextSelectionService $contextSelectionService,
     )
     {}
 
@@ -96,12 +98,6 @@ class ChatService
      */
     public function answer(Site $site, string $question, Conversation $conversation): ChatResponse
     {
-
-        /*Log::info('CHAT ANSWER DEBUG', [
-            'conversation_id' => $conversation->id,
-            'conversation_site_id' => $conversation->site_id ?? null,
-            'site_object_id' => $site->id,
-        ]);*/
 
         // ─────────────────────────────
         // 0️⃣ Intent Classification
@@ -141,11 +137,6 @@ class ChatService
                 ];
             })
             ->toArray();
-
-        // ─────────────────────────────
-        // 0.5️⃣ Préparer la question (rewrite si follow-up)
-        // ─────────────────────────────
-        //$preparedQuestion = $this->prepareQuestion($question, $conversation);
 
         $queryPlan = $this->queryAnalyzer->analyze($question, $conversation);
         Log::info("Query Plan Prepare", [
@@ -194,7 +185,7 @@ class ChatService
         // ─────────────────────────────
         // 2️⃣ Embedding
         // ─────────────────────────────
-        $results = [];
+        $resultsMap = [];
 
         foreach ($queries as $q) {
 
@@ -204,60 +195,76 @@ class ChatService
                 query: $q,
                 embedding: $embedding,
                 siteId: $site->id,
-                limit: $queryPlan->topK ?? 8,
+                limit: $queryPlan->topK ?? 30,
                 scoreThreshold: floatval($site->settings->min_similarity_score),
             );
 
-            $results = array_merge($results, $partial);
+            foreach ($partial as $item) {
+
+                $id = $item['id'];
+
+                if (!isset($resultsMap[$id])) {
+                    $resultsMap[$id] = $item;
+
+                    $resultsMap[$id]['hit_count'] = 0;
+                    $resultsMap[$id]['multi_query_score'] = 0;
+                }
+
+                // 🔥 count occurrences
+                $resultsMap[$id]['hit_count']++;
+
+                // 🔥 léger bonus par présence multi-query
+                $resultsMap[$id]['multi_query_score'] += 1;
+            }
         }
 
-        $results = collect($results)
+        foreach ($resultsMap as &$item) {
+            $hits = $item['hit_count'];
+            // bonus logarithmique (très important pour éviter domination)
+            $item['multi_query_bonus'] = min(0.15, log(1 + $hits) * 0.05);
+        }
+
+        $resultsHybridSearch = collect($resultsMap)
+            ->map(function ($item) {
+
+                $hits = $item['hit_count'] ?? 1;
+
+                $item['multi_query_bonus'] = min(0.15, log(1 + $hits) * 0.05);
+
+                // 🔥 UPDATE GLOBAL SCORE
+                $item['score'] = ($item['rrf_score'] ?? 0) + $item['multi_query_bonus'];
+
+                return $item;
+            })
             ->sortByDesc('score')
-            ->unique('id')
             ->values()
             ->toArray();
+        //Log::info("APRES RECHERCHE HYBRIDE APRES CLASSEMENT", $resultsHybridSearch);
 
-        $results = $this->retrievalOptimizer->optimize(
-            $results,
+        // ─────────────────────────────
+        // 5️⃣ Hydratation
+        // ─────────────────────────────
+        $hydrated = $this->chunkHydrationService->hydrate($resultsHybridSearch);
+        //Log::info("Hydrated Chunks :", $hydrated);
+        $historyMessagesResults = [];
+        $hydratedMessages = $this->chunkHydrationService->hydrateMessages($historyMessagesResults);
+        //Log::info("Hydrated Messages :", $hydratedMessages);
+
+        $resultsOptimizer = $this->retrievalOptimizer->optimize(
+            $hydrated,
             $queryPlan
         );
+        //Log::info("Optimized Results", $resultsOptimizer);
 
-        Log::info("Optimized Results", [
-            "results" => $results
-        ]);
-
-        $results = $this->LLMReRankerService->rerank(
+        $resultsReRanker = $this->LLMReRankerService->rerank(
             query: $query,
-            chunks: $results,
+            chunks: $resultsOptimizer,
             topK: 12
         );
-
-        // ─────────────────────────────
-        // 3️⃣ Recherche historique vectorielle
-        // ─────────────────────────────
-        /*$historyMessagesResults = $this->vectorSearchService->searchMessages(
-            embedding: $questionEmbedding,
-            conversationId: $conversation->id,
-            limit: 3,
-            scoreThreshold: 0.45, // seuil plus bas pour récupérer un contexte large
-            collection: "conversations_{$conversation->id}"
-        );*/
-        $historyMessagesResults = [];
-
-        // ─────────────────────────────
-        // 4️⃣ Recherche Qdrant
-        // ─────────────────────────────
-        /*$questionEmbedding = $this->embeddingService->getEmbedding($query);
-        $qdrantResults = $this->vectorSearchService->search(
-            embedding: $questionEmbedding,
-            siteId: $site->id,
-            limit: 10,
-            scoreThreshold: floatval($site->settings->min_similarity_score),
-            collection: "chunks_{$site->id}"
-        );*/
+        //Log::info("ReRanking Results", $resultsReRanker);
 
         // 3️⃣ Fallback si rien trouvé
-        if (empty($results)) {
+        if (empty($resultsReRanker)) {
             UnansweredQuestion::create([
                 'site_id' => $site->id,
                 'question' => $question,
@@ -272,47 +279,23 @@ class ChatService
         }
 
         // ─────────────────────────────
-        // 5️⃣ Hydratation
-        // ─────────────────────────────
-        //$hydrated = $this->chunkHydrationService->hydrate($qdrantResults);
-        $hydrated = $this->chunkHydrationService->hydrate($results);
-        Log::info("Hydrated Chunks :", $hydrated);
-        $hydratedMessages = $this->chunkHydrationService->hydrateMessages($historyMessagesResults);
-        //Log::info("Hydrated Messages :", $hydratedMessages);
-        // ─────────────────────────────
         // 6️⃣ Ranking métier
         // ─────────────────────────────
-        //$ragContextChunks = $this->diversifyChunks($hydrated, 10);
-        //$ragContextChunks = $this->chunkRankingService->rank($ragContextChunks, floatval($site->settings->min_similarity_score));
-        $ragContextChunks = $this->chunkRankingService->rank($hydrated, floatval($site->settings->min_similarity_score));
-        $isValidContext = $this->contextValidator->validate(
+
+        $ragContextChunks = $this->chunkRankingService->rank($resultsReRanker, floatval($site->settings->min_similarity_score));
+        //Log::info("RAG CONTEXT CHUNKS", $ragContextChunks);
+
+        $resultsContextSelection = $this->contextSelectionService->select(
             $ragContextChunks,
-            $queryPlan
+            $queryPlan,
+            10
         );
+        Log::info("CHUNKS SELECT", $resultsContextSelection);
 
-        if (!$isValidContext) {
-
-            Log::warning("Context rejected by validator", [
-                "question" => $question
-            ]);
-
-            UnansweredQuestion::create([
-                'site_id' => $site->id,
-                'question' => $question,
-            ]);
-
-            return new ChatResponse(
-                message: "Je ne trouve pas d'information fiable sur ce sujet dans les données disponibles.",
-                ctas: []
-            );
-        }
-        //Log::info("RAG Context Chunks :", $ragContextChunks);
-        $ragContextChunks = $this->entityResolver->resolve(collect($ragContextChunks));
+        $ragContextChunks = $this->entityResolver->resolve(collect($resultsContextSelection));
         $entities = $this->entityExtractor->extract($ragContextChunks);
-        Log::info("ENTITIES RECUPERER: ", [
-            "entities" => $entities
-        ]);
-        //Log::info("***RAG Context Chunks With RESOLVE: ", $ragContextChunks);
+        //Log::info("ENTITIES RECUPERER: ",  $entities);
+
         $ragContextMessages = collect($hydratedMessages)->sortByDesc('vector_score')->take(5)->toArray();
 
         // Après avoir hydraté et résolu les entités
@@ -331,15 +314,26 @@ class ChatService
         // 7️⃣ Fusion + limite globale
         // ─────────────────────────────
         $allContextChunks = collect(array_merge($ragContextChunks, $ragContextMessages))
-            //->sortByDesc(fn($c) => $c['vector_score'] ?? 0)
-            ->sortByDesc(fn($c) => $c['final_score'] ?? $c['score'] ?? 0)
+            ->sortByDesc(function ($c) {
+                $score = $c['final_score'] ?? $c['vector_score'] ?? $c['score'] ?? 0;
+
+                // 🔥 pénaliser messages légèrement
+                if (($c['type'] ?? null) === 'message') {
+                    $score *= 0.8;
+                }
+
+                // 🔥 pénaliser alias fort
+                if (($c['type'] ?? null) === 'statistical_alias') {
+                    $score *= 0.6;
+                }
+
+                return $score;
+            })
             ->toArray();
-        $maxChunks = 8; // chunks + messages
+        $maxChunks = 10; // chunks + messages
         $allContextChunks = array_slice($allContextChunks, 0, $maxChunks);
 
         // Construire le contexte final pour le LLM
-        /*$context = $this->contextCompressor->compress($allContextChunks, $site, $conversation);
-        Log::info("Compressed Context:", ['context' => $context]);*/
         $context = $this->contextBuilder->build($allContextChunks);
 
         if (trim($context) === '') {
@@ -352,12 +346,6 @@ class ChatService
         // ─────────────────────────────
         // 8️⃣ Construction Prompt
         // ─────────────────────────────
-        /*Log::info("DONNES POUR PROMPT BUILDER", [
-            'site' => $site->id,
-            'question' => $question,
-            'context' => $context,
-            'history' => $history,
-        ]);*/
 
         $entities = $this->entityRelevanceService->filterRelevant(
             $entities,
@@ -385,11 +373,6 @@ class ChatService
         );
 
         //Log::info("Prompt Payload:", $promptPayload);
-
-        // ─────────────────────────────
-        // 8.5️⃣ Résolution CTA
-        // ─────────────────────────────
-
 
         // ─────────────────────────────
         // 9️⃣ Appel LLM
@@ -559,32 +542,6 @@ class ChatService
         // throw new Exception($finalErrorMessage);
 
     }
-    private function enrichQuestionWithHistory(string $question, Conversation $conversation): string
-    {
-        // Si question courte ou ambiguë
-        if (str_word_count($question) <= 6) {
-
-            $lastMessages = Message::where('conversation_id', $conversation->id)
-                ->orderBy('created_at', 'desc')
-                ->take(2)
-                ->get()
-                ->reverse()
-                ->pluck('content')
-                ->implode(" ");
-
-            if ($lastMessages) {
-                return $lastMessages . " " . $question;
-            }
-        }
-
-        return $question;
-    }
-    private function prepareQuestion(string $question): string
-    {
-
-        return $question;
-    }
-
     public function updateConversationSummary(Conversation $conversation): void
     {
         $oldSummary = $conversation->summary ?? '{}';
@@ -998,41 +955,6 @@ class ChatService
             'user_info' => []
         ];
     }
-
-    private function diversifyChunks(array $chunks, int $limit = 5): array
-    {
-        $selected = [];
-
-        foreach ($chunks as $chunk) {
-
-            $tooSimilar = false;
-
-            foreach ($selected as $s) {
-
-                similar_text(
-                    strtolower($chunk['text']),
-                    strtolower($s['text']),
-                    $percent
-                );
-
-                if ($percent > 70) {
-                    $tooSimilar = true;
-                    break;
-                }
-            }
-
-            if (!$tooSimilar) {
-                $selected[] = $chunk;
-            }
-
-            if (count($selected) >= $limit) {
-                break;
-            }
-        }
-
-        return $selected;
-    }
-
     private function buildEntitiesFallbackMessage(array $entities): ?string
     {
         if (empty($entities)) {
@@ -1076,6 +998,6 @@ class ChatService
         }
 
         // ✨ Markdown propre
-        return "Nous n’avons pas cette information exacte.\n\n---\n\n💡 **Voici {$list} qui pourraient vous être utiles :**";
+        return "Nous n’avons pas cette information exacte.\n\n---\n\n **Voici {$list} qui pourraient vous être utiles :**";
     }
 }

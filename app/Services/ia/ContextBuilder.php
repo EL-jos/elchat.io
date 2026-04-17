@@ -48,7 +48,15 @@ class ContextBuilder
             $importance = $score > 0.8 ? 'HIGH' : ($score > 0.6 ? 'MEDIUM' : 'LOW');
 
 
-            $metadata = json_decode($chunk['metadata'] ?? '{}', true) ?? [];
+            $metadata = $chunk['metadata'] ?? [];
+
+            if (is_string($metadata)) {
+                $metadata = json_decode($metadata, true) ?? [];
+            }
+
+            if (!is_array($metadata)) {
+                $metadata = [];
+            }
 
             if (!is_array($metadata)) {
                 $metadata = [];
