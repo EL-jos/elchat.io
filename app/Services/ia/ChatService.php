@@ -189,10 +189,22 @@ class ChatService
         // ─────────────────────────────
         // 2️⃣ Retrieval (Single ou Multi-hop)
         // ─────────────────────────────
-        $hydrated = [];
+        $promptPayload = [];
+        $entities = [];
+        $ctas = [];
         if($this->multiHopPipelineService->shouldUseMultiHop(queryPlan: $queryPlan)){
             Log::info("🚀 Multi-hop pipeline activated");
-            $hydrated = $this->multiHopPipelineService->handle(question: $question,queryPlan: $queryPlan,site: $site);
+            $results = $this->multiHopPipelineService->handle(
+                question: $question,
+                plan: $queryPlan,
+                site: $site,
+                conversation: $conversation,
+                history: $history
+            );
+            //Log::info("Dans CHAT SERVICE - Prompt Payload:", $promptPayload);
+            $promptPayload = $results['prompt'];
+            $entities = $results['entities'];
+            $ctas = $results['ctas'];
         }else{
             $resultsMap = [];
 
@@ -248,139 +260,136 @@ class ChatService
             // 5️⃣ Hydratation
             // ─────────────────────────────
             $hydrated = $this->chunkHydrationService->hydrate($resultsHybridSearch);
+            //Log::info("Hydrated Chunks :", $hydrated);
+            $historyMessagesResults = [];
+            $hydratedMessages = $this->chunkHydrationService->hydrateMessages($historyMessagesResults);
+            //Log::info("Hydrated Messages :", $hydratedMessages);
 
-        }
-        Log::info("Hydrated Chunks :", $hydrated);
-        $historyMessagesResults = [];
-        $hydratedMessages = $this->chunkHydrationService->hydrateMessages($historyMessagesResults);
-        //Log::info("Hydrated Messages :", $hydratedMessages);
+            $resultsOptimizer = $this->retrievalOptimizer->optimize(
+                $hydrated,
+                $queryPlan
+            );
+            //Log::info("Optimized Results", $resultsOptimizer);
 
-        $resultsOptimizer = $this->retrievalOptimizer->optimize(
-            $hydrated,
-            $queryPlan
-        );
-        //Log::info("Optimized Results", $resultsOptimizer);
+            $resultsReRanker = $this->LLMReRankerService->rerank(
+                query: $query,
+                chunks: $resultsOptimizer,
+                topK: 12
+            );
+            //Log::info("ReRanking Results", $resultsReRanker);
 
-        $resultsReRanker = $this->LLMReRankerService->rerank(
-            query: $query,
-            chunks: $resultsOptimizer,
-            topK: 12
-        );
-        //Log::info("ReRanking Results", $resultsReRanker);
+            // 3️⃣ Fallback si rien trouvé
+            if (empty($resultsReRanker)) {
+                UnansweredQuestion::create([
+                    'site_id' => $site->id,
+                    'question' => $question,
+                ]);
 
-        // 3️⃣ Fallback si rien trouvé
-        if (empty($resultsReRanker)) {
-            UnansweredQuestion::create([
-                'site_id' => $site->id,
-                'question' => $question,
-            ]);
-
-            //dd(empty($qdrantResults), $qdrantResults, $site->id, floatval($site->settings->min_similarity_score));
-            return new ChatResponse(
-                message: "Je n’ai pas trouvé cette information dans les données de notre entreprise.
+                //dd(empty($qdrantResults), $qdrantResults, $site->id, floatval($site->settings->min_similarity_score));
+                return new ChatResponse(
+                    message: "Je n’ai pas trouvé cette information dans les données de notre entreprise.
             N’hésitez pas à nous préciser votre besoin ou à nous contacter directement.",
-                ctas: []
+                    ctas: []
+                );
+            }
+
+            // ─────────────────────────────
+            // 6️⃣ Ranking métier
+            // ─────────────────────────────
+            $ragContextChunks = $this->chunkRankingService->rank($resultsReRanker, floatval($site->settings->min_similarity_score));
+            //Log::info("RAG CONTEXT CHUNKS", $ragContextChunks);
+
+            $resultsContextSelection = $this->contextSelectionService->select(
+                $ragContextChunks,
+                $queryPlan,
+                10
             );
+            //Log::info("CHUNKS SELECT", $resultsContextSelection);
+
+            $ragContextChunks = $this->entityResolver->resolve(collect($resultsContextSelection));
+            $entities = $this->entityExtractor->extract($ragContextChunks);
+            //Log::info("ENTITIES RECUPERER: ",  $entities);
+            $ragContextMessages = collect($hydratedMessages)->sortByDesc('vector_score')->take(5)->toArray();
+
+            // Après avoir hydraté et résolu les entités
+            $ragContextChunks = collect($ragContextChunks)
+                ->map(fn($chunk) => [
+                    ...$chunk,
+                    'text' => $chunk['text'],
+                ])->toArray();
+            $ragContextMessages = collect($ragContextMessages)
+                ->map(fn($msg) => [
+                    ...$msg,
+                    'text' => $msg['text'],
+                ])->toArray();
+
+
+            // ─────────────────────────────
+            // 7️⃣ Fusion + limite globale
+            // ─────────────────────────────
+            $allContextChunks = collect(array_merge($ragContextChunks, $ragContextMessages))
+                ->sortByDesc(function ($c) {
+                    $score = $c['final_score'] ?? $c['vector_score'] ?? $c['score'] ?? 0;
+
+                    // 🔥 pénaliser messages légèrement
+                    if (($c['type'] ?? null) === 'message') {
+                        $score *= 0.8;
+                    }
+
+                    // 🔥 pénaliser alias fort
+                    if (($c['type'] ?? null) === 'statistical_alias') {
+                        $score *= 0.6;
+                    }
+
+                    return $score;
+                })
+                ->toArray();
+            $maxChunks = 10; // chunks + messages
+            $allContextChunks = array_slice($allContextChunks, 0, $maxChunks);
+            // Construire le contexte final pour le LLM
+            $context = $this->contextBuilder->build($allContextChunks);
+            /*Log::info("CONTEXT BUILDER", [
+                'context' => $context
+            ]);*/
+
+            if (trim($context) === '') {
+                return new ChatResponse(
+                    message: "Je n’ai pas d’information fiable à ce sujet pour le moment.",
+                    ctas: []
+                );
+            }
+
+            $entities = $this->entityRelevanceService->filterRelevant(
+                $entities,
+                $query,
+                $queryPlan->entities ?? []
+            );
+            $ctas = $this->CTAEngine->resolve($site, $queryPlan, $conversation);
+            //Log::info("Resolved CTAs:", ['ctas' => $ctas]);
+            $ctas = $this->ctaRelevanceService->filterRelevant(
+                $ctas,
+                $queryPlan,
+                $query,
+                $entities
+            );
+
+            // ─────────────────────────────
+            // 8️⃣ Construction Prompt
+            // ─────────────────────────────
+
+            $promptPayload = $this->promptBuilder->build(
+                site: $site,
+                question: $question,
+                context: $context,
+                history: $history,
+                conversation: $conversation,
+                cats: $ctas,
+                entities: $entities
+            );
+
+            //Log::info("Prompt Payload:", $promptPayload);
         }
 
-        // ─────────────────────────────
-        // 6️⃣ Ranking métier
-        // ─────────────────────────────
-
-        $ragContextChunks = $this->chunkRankingService->rank($resultsReRanker, floatval($site->settings->min_similarity_score));
-        //Log::info("RAG CONTEXT CHUNKS", $ragContextChunks);
-
-        $resultsContextSelection = $this->contextSelectionService->select(
-            $ragContextChunks,
-            $queryPlan,
-            10
-        );
-        Log::info("CHUNKS SELECT", $resultsContextSelection);
-
-        $ragContextChunks = $this->entityResolver->resolve(collect($resultsContextSelection));
-        $entities = $this->entityExtractor->extract($ragContextChunks);
-        //Log::info("ENTITIES RECUPERER: ",  $entities);
-
-        $ragContextMessages = collect($hydratedMessages)->sortByDesc('vector_score')->take(5)->toArray();
-
-        // Après avoir hydraté et résolu les entités
-        $ragContextChunks = collect($ragContextChunks)
-            ->map(fn($chunk) => [
-                ...$chunk,
-                'text' => $chunk['text'],
-            ])->toArray();
-        $ragContextMessages = collect($ragContextMessages)
-            ->map(fn($msg) => [
-                ...$msg,
-                'text' => $msg['text'],
-            ])->toArray();
-
-        // ─────────────────────────────
-        // 7️⃣ Fusion + limite globale
-        // ─────────────────────────────
-        $allContextChunks = collect(array_merge($ragContextChunks, $ragContextMessages))
-            ->sortByDesc(function ($c) {
-                $score = $c['final_score'] ?? $c['vector_score'] ?? $c['score'] ?? 0;
-
-                // 🔥 pénaliser messages légèrement
-                if (($c['type'] ?? null) === 'message') {
-                    $score *= 0.8;
-                }
-
-                // 🔥 pénaliser alias fort
-                if (($c['type'] ?? null) === 'statistical_alias') {
-                    $score *= 0.6;
-                }
-
-                return $score;
-            })
-            ->toArray();
-        $maxChunks = 10; // chunks + messages
-        $allContextChunks = array_slice($allContextChunks, 0, $maxChunks);
-
-        // Construire le contexte final pour le LLM
-        $context = $this->contextBuilder->build($allContextChunks);
-        Log::info("CONTEXT BUILDER", [
-            'context' => $context
-        ]);
-
-        if (trim($context) === '') {
-            return new ChatResponse(
-                message: "Je n’ai pas d’information fiable à ce sujet pour le moment.",
-                ctas: []
-            );
-        }
-
-        // ─────────────────────────────
-        // 8️⃣ Construction Prompt
-        // ─────────────────────────────
-
-        $entities = $this->entityRelevanceService->filterRelevant(
-            $entities,
-            $query,
-            $queryPlan->entities ?? []
-        );
-
-        $ctas = $this->CTAEngine->resolve($site, $queryPlan, $conversation);
-        Log::info("Resolved CTAs:", ['ctas' => $ctas]);
-        $ctas = $this->ctaRelevanceService->filterRelevant(
-            $ctas,
-            $queryPlan,
-            $query,
-            $entities
-        );
-
-        $promptPayload = $this->promptBuilder->build(
-            site: $site,
-            question: $question,
-            context: $context,
-            history: $history,
-            conversation: $conversation,
-            cats: $ctas,
-            entities: $entities
-        );
-
-        Log::info("Prompt Payload:", $promptPayload);
 
         // ─────────────────────────────
         // 9️⃣ Appel LLM
@@ -401,8 +410,6 @@ class ChatService
             "ctas" => $ctas,
             "entities" => $entities,
         ]);
-
-
 
         // Si réponse vide / non disponible mais entities présentes
         if ($validatedResponse ===  "Cette information n’est pas disponible dans nos documents internes.") {

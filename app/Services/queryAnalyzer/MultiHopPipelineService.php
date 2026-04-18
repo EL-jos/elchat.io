@@ -2,10 +2,20 @@
 
 namespace App\Services\queryAnalyzer;
 
+use App\Models\Conversation;
 use App\Models\Site;
 use App\Services\chunks\ChunkHydrationService;
+use App\Services\chunks\ChunkRankingService;
+use App\Services\cta\CTAEngine;
+use App\Services\cta\CTARelevanceService;
 use App\Services\hybrid\HybridSearchService;
+use App\Services\ia\ContextBuilder;
 use App\Services\ia\EmbeddingService;
+use App\Services\ia\EntityExtractor;
+use App\Services\ia\EntityRelevanceService;
+use App\Services\ia\EntityResolver;
+use App\Services\ia\PromptBuilder;
+use App\Services\rag\ContextSelectionService;
 use App\Services\rag\LLMReRankerService;
 use App\Services\rag\RetrievalOptimizer;
 use Exception;
@@ -22,135 +32,327 @@ class MultiHopPipelineService
         protected ChunkHydrationService $chunkHydrationService,
         protected LLMReRankerService $LLMReRankerService,
         protected RetrievalOptimizer $retrievalOptimizer,
+        protected ChunkRankingService $chunkRankingService,
+        protected ContextSelectionService $contextSelectionService,
+        protected EntityResolver $entityResolver,
+        protected EntityExtractor $entityExtractor,
+        protected ContextBuilder $contextBuilder,
+        protected EntityRelevanceService $entityRelevanceService,
+        protected CTAEngine $CTAEngine,
+        protected CTARelevanceService $CTARelevanceService,
+        protected PromptBuilder $promptBuilder,
     ){}
-    public function handle(
-        string $question,
-        QueryPlan $queryPlan,
-        Site $site
-    ): array {
+    public function handle(string $question, QueryPlan $plan, Site $site, Conversation $conversation = null, array $history = [],): array
+    {
+        $state = $this->initState($plan);
 
-        $state = $this->initState();
-        $allResults = [];
+        $this->ensureObjectiveEmbeddings($state);
 
-        $currentQuery = $this->queryPlan->cleanQuery;
+        $maxHops = 4;
 
-        for ($i = 0; $i < 3; $i++) {
+        for ($i = 0; $i < $maxHops; $i++) {
 
-            $results = $this->executeHop(
-                query: $currentQuery,
-                site: $site,
-                state: $state,
-                queryPlan: $queryPlan,
+            $state = $this->computeCoverage($state);
+
+            if ($this->isComplete($state)) {
+                break;
+            }
+
+            $nextObjective = $this->selectNextObjective($state);
+
+            $query = $this->buildQueryFromObjective($nextObjective, $state, $question);
+
+            $results = $this->retrieve($query, $site, $state, $plan);
+
+            if (empty($results)) break;
+
+            // 🔥 PIPELINE RETRIEVAL
+            $results = $this->retrievalOptimizer->optimize($results, $plan);
+            $results = array_values(array_filter($results, function ($c) {
+                if (!isset($c['id'])) {
+                    Log::warning('Chunk sans ID supprimé', ['chunk' => $c]);
+                    return false;
+                }
+                return true;
+            }));
+            //Log::info("RESULTAT DE Optimizer", $results);
+
+            $results = $this->LLMReRankerService->rerank(
+                query: $query,
+                chunks: $results,
+                topK: 15
+            );
+            $results = array_values(array_filter($results, function ($c) {
+                if (!isset($c['id'])) {
+                    Log::warning('Chunk sans ID supprimé', ['chunk' => $c]);
+                    return false;
+                }
+                return true;
+            }));
+            //Log::info("RESULTAT DE RERANKER", $results);
+
+            $results = $this->chunkRankingService->rank(
+                chunks: $results,
+                minScore: $site->settings->min_similarity_score,
+                limit: 10
+            );
+            $results = array_values(array_filter($results, function ($c) {
+                if (!isset($c['id'])) {
+                    Log::warning('Chunk sans ID supprimé', ['chunk' => $c]);
+                    return false;
+                }
+                return true;
+            }));
+            //Log::info("RESULTAT DE RANKER", $results);
+
+            $results = $this->contextSelectionService->select(
+                chunks: $results,
+                queryPlan: $plan,
+                limit: 8,
+                maxTokens: 1200
             );
 
-            if (empty($results)) {
-                break;
-            }
+            $results = array_values(array_filter($results, function ($c) {
+                if (!isset($c['id'])) {
+                    Log::warning('Chunk sans ID supprimé', ['chunk' => $c]);
+                    return false;
+                }
+                return true;
+            }));
+            //Log::info("RESULTAT DE SELECTION", $results);
 
-            $allResults[] = $results;
+            // 🔥 evidence uniquement ici
+            $state = $this->ingestEvidence($state, $results, $nextObjective);
 
-            $state = $this->updateState($state, $results);
+            $state = $this->evaluateState($state, $results);
 
-            if ($this->shouldStop($state, $results)) {
-                break;
-            }
-
-            $currentQuery = $this->generateNextQuery($question, $state);
-
-            Log::info("Multi-hop next query", [
-                'hop' => $i,
-                'query' => $currentQuery
-            ]);
+            $state['hop']++;
         }
 
-        return $this->mergeResults($allResults);
-    }
-    protected function initState(): array
-    {
+        // =====================================================
+        // 🔥 POST-PROCESS GLOBAL (IMPORTANT CHANGEMENT)
+        // =====================================================
+
+        $finalChunks = $this->getFinalChunks($state);
+        Log::info("ENTITY LAYER GLOBAL", [
+            "finalChunks" => $finalChunks,
+        ]);
+
+        // 🔥 ENTITY LAYER GLOBAL
+        $resolved = $this->entityResolver->resolve(collect($finalChunks));
+
+        $entities = $this->entityExtractor->extract($resolved);
+        $entities = $this->entityRelevanceService->filterRelevant(
+            $entities,
+            $plan->cleanQuery,
+            $plan->entities ?? []
+        );
+
+        $ctas = $this->CTAEngine->resolve($site, $plan, $conversation);
+        Log::info("Resolved CTAs:", ['ctas' => $ctas]);
+        $ctas = $this->CTARelevanceService->filterRelevant(
+            $ctas,
+            $plan,
+            $plan->cleanQuery,
+            $entities
+        );
+
+        // 🔥 CONTEXT FINAL GLOBAL
+        $context = $this->contextBuilder->build($resolved);
+        Log::info("CONTEXT BUILDER", [
+            'context' => $context
+        ]);
+
+        $state['entities'] = $entities;
+        $state['ctas'] = $ctas;
+        $state['context'] = $context;
+
+        $prompt = $this->promptBuilder->build(
+            site: $site,
+            question: $question,
+            context: $context,
+            history: $history,
+            conversation: $conversation,
+            cats: $ctas ?? [],
+            entities: $entities ?? []
+        );
+        //Log::info("Prompt Payload:", $prompt);
+
         return [
-            'visited_ids' => [],
-            'entities' => [],
-            'keywords' => [],
-            'context_fragments' => [],
-            'hop' => 0,
+            'context' => $context,
+            'entities' => $entities,
+            'prompt' => $prompt,
+            'state' => $this->buildFinalContext($state),
+            'ctas' => $ctas,
         ];
     }
-
-    protected function updateState(array $state, array $results): array
+    protected function initState(QueryPlan $plan): array
     {
-        foreach ($results as $chunk) {
+        return [
+            'hop' => 0,
+            'visited_ids' => [],
 
-            $state['visited_ids'] = array_unique(array_merge(
-                $state['visited_ids'],
-                [$chunk['id']]
-            ));
+            // 🔥 compréhension
+            'entities' => $plan->entities ?? [],
+            'intent' => $plan->intent,
+            'constraints' => $plan->constraints ?? [],
 
-            // 🔥 entities (si déjà extraites)
-            if (!empty($chunk['entities'] ?? null)) {
-                $state['entities'] = array_unique(array_merge(
-                    $state['entities'],
-                    $chunk['entities']
-                ));
+            // 🔥 reasoning tracking
+            'objectives' => $this->extractObjectives($plan),
+            'covered_objectives' => [],
+            'missing_objectives' => [],
+
+            // 🔥 knowledge
+            'evidence' => [],
+            'evidence_by_source' => [],
+            'keywords' => [],
+
+            // 🔥 diagnostics
+            // remplace ton confidence simple
+            'confidence' => [
+                'coverage' => 0,
+                'quality' => 0,
+                'diversity' => 0,
+            ],
+
+            'objective_embeddings' => [],
+            'evidence_by_objective' => [],
+            'objective_scores' => [],
+        ];
+    }
+    protected function extractObjectives(QueryPlan $plan): array
+    {
+        $objectives = [];
+
+        if ($plan->intent === 'comparison') {
+            foreach ($plan->entities as $entity) {
+
+                if (is_array($entity)) {
+                    $entity = $entity['type']
+                        ?? $entity['value']
+                        ?? null;
+                }
+
+                if (!$entity || is_array($entity)) {
+                    continue;
+                }
+
+                $objectives[] = "features:" . strtolower($entity);
             }
 
-            // 🔥 keywords depuis texte
-            if (!empty($chunk['text'])) {
-                $tokens = $this->extractKeywords($chunk['text']);
-                $state['keywords'] = array_unique(array_merge($state['keywords'], $tokens));
+            foreach ($plan->constraints as $c) {
+
+                if (is_array($c)) {
+                    $value = $c['value'] ?? null;
+                } elseif (is_object($c)) {
+                    $value = $c->value ?? null;
+                } else {
+                    $value = $c;
+                }
+
+                if (is_string($value) && $value !== '') {
+                    $objectives[] = "constraint:$value";
+                }
             }
 
-            // 🔥 garder morceaux utiles
-            $state['context_fragments'][] = substr($chunk['text'] ?? '', 0, 200);
+            $objectives[] = "comparison";
         }
 
-        $state['hop']++;
+        if ($plan->intent === 'informational') {
+            $objectives[] = "explanation";
+        }
+
+        return $objectives;
+    }
+    protected function computeCoverage(array $state): array
+    {
+        $covered = [];
+
+        foreach ($state['objectives'] as $obj) {
+
+            if ($this->hasEvidenceFor($obj, $state)) {
+                $covered[] = $obj;
+            }
+        }
+
+        $state['covered_objectives'] = $covered;
+        $state['missing_objectives'] = array_diff($state['objectives'], $covered);
 
         return $state;
     }
-    protected function extractKeywords(string $text): array
+    protected function selectNextObjective(array $state): ?string
     {
-        $text = strtolower($text);
+        if (empty($state['missing_objectives'])) {
+            return null;
+        }
 
-        $tokens = preg_split('/[\s,.;:!?()]+/', $text);
+        // priorité aux contraintes
+        foreach ($state['missing_objectives'] as $obj) {
+            if (str_starts_with($obj, 'constraint:')) {
+                return $obj;
+            }
+        }
 
-        return array_values(array_filter($tokens, fn($t) => strlen($t) > 4));
+        return $state['missing_objectives'][0];
     }
-    protected function buildContextFromState(array $state): string
+    protected function buildQueryFromObjective(string $objective, array $state, string $question): string
     {
-        $fragments = array_slice($state['context_fragments'], 0, 5);
+        if (str_starts_with($objective, 'features:')) {
+            $entity = str_replace('features:', '', $objective);
+            return "$entity caractéristiques détails";
+        }
 
-        return implode("\n", $fragments);
+        if (str_starts_with($objective, 'constraint:')) {
+            $constraint = str_replace('constraint:', '', $objective);
+            return "information sur $constraint";
+        }
+
+        if ($objective === 'comparison') {
+            return implode(' vs ', $state['entities']) . " comparaison";
+        }
+
+        return $question;
     }
-    protected function executeHop(string $query, Site $site, array $state, QueryPlan $queryPlan): array
+    protected function retrieve(string $query, Site $site, array $state, QueryPlan $plan): array
     {
-        $embedding = $this->embeddingService->getEmbedding($query);
-
-        $results = $this->hybridSearchService->search(
-            query: $query,
-            embedding: $embedding,
-            siteId: $site->id,
-            limit: 30,
-            scoreThreshold: floatval($site->settings->min_similarity_score),
-        );
+        $queries = $plan->subQueries ?? [];
+        if (empty($queries)) {
+            foreach ($plan->entities as $entity) {
+                $queries[] = is_array($entity)
+                    ? ($entity['value'] ?? null)
+                    : $entity;
+            }
+        }
+        array_unshift($queries, $query);
 
         $resultsMap = [];
+        foreach ($queries as $q){
 
-        foreach ($results as $item) {
+            $embedding = $this->embeddingService->getEmbedding($q);
 
-            $id = $item['id'];
+            $partial = $this->hybridSearchService->search(
+                query: $q,
+                embedding: $embedding,
+                siteId: $site->id,
+                limit: 20,
+            );
+            foreach ($partial as $item) {
 
-            if (!isset($resultsMap[$id])) {
-                $resultsMap[$id] = $item;
+                $id = $item['id'];
 
-                $resultsMap[$id]['hit_count'] = 0;
-                $resultsMap[$id]['multi_query_score'] = 0;
+                if (!isset($resultsMap[$id])) {
+                    $resultsMap[$id] = $item;
+
+                    $resultsMap[$id]['hit_count'] = 0;
+                    $resultsMap[$id]['multi_query_score'] = 0;
+                }
+
+                // 🔥 count occurrences
+                $resultsMap[$id]['hit_count']++;
+
+                // 🔥 léger bonus par présence multi-query
+                $resultsMap[$id]['multi_query_score'] += 1;
             }
-
-            // 🔥 count occurrences
-            $resultsMap[$id]['hit_count']++;
-
-            // 🔥 léger bonus par présence multi-query
-            $resultsMap[$id]['multi_query_score'] += 1;
         }
 
         $resultsHybridSearch = collect($resultsMap)
@@ -165,130 +367,116 @@ class MultiHopPipelineService
 
                 return $item;
             })
-            ->sortByDesc('score')
+            //->sortByDesc('score')
             ->values()
             ->toArray();
+        //Log::info("APRES RECHERCHE HYBRIDE APRES CLASSEMENT", $resultsHybridSearch);
 
         $hydrated = $this->chunkHydrationService->hydrate($resultsHybridSearch);
-
-        return $hydrated;
-    }
-    protected function generateNextQuery(string $question, array $state): string
-    {
-        $context = $this->buildContextFromState($state);
-
-        $prompt = [
-            "role" => "system",
-            "content" => "Tu es un moteur de recherche avancé. Génère UNE requête de recherche complémentaire, plus précise, différente de la question initiale."
-        ];
-
-        $userPrompt = [
-            "role" => "user",
-            "content" => "
-Question initiale:
-{$question}
-
-Contexte déjà trouvé:
-{$context}
-
-Mots-clés importants:
-" . implode(', ', array_slice($state['keywords'], 0, 10)) . "
-
-Entités:
-" . implode(', ', array_slice($state['entities'], 0, 10)) . "
-
-Objectif:
-Trouver une information complémentaire NON couverte.
-
-Contraintes:
-- Pas de répétition
-- Plus spécifique ou angle différent
-- Ajouter précision métier si possible
-- Format: une seule phrase courte
-"
-        ];
-        for ($attempt = 1; $attempt <= $this->maxRetries; $attempt++) {
-            try {
-                $response = Http::withHeaders([
-                    'Authorization' => 'Bearer ' . env('OPENROUTER_API_KEY'),
-                ])->post('https://openrouter.ai/api/v1/chat/completions', [
-                    'model' => 'openai/gpt-4o-mini',
-                    'messages' => [$prompt, $userPrompt],
-                    'temperature' => 0.3,
-                    'max_tokens' => 50,
-                ]);
-
-                if ($response->successful()) {
-                    return trim($response->json()['choices'][0]['message']['content'] ?? '');
-                }
-
-            } catch (Exception $e) {
-                Log::warning("NextQuery generation failed", ['error' => $e->getMessage()]);
-            }
-            sleep(pow(2, $attempt)); // backoff
-        }
-
-        // 🔥 fallback intelligent
-        return $question . " details";
-    }
-    protected function mergeResults(array $hops): array
-    {
-        return collect($hops)
-            ->flatten(1) // 🔥 supprime le niveau hop
-            ->groupBy('id')
-            ->map(function ($items) {
-
-                // prend le meilleur chunk
-                $best = collect($items)
-                    ->sortByDesc('score')
-                    ->first();
-
-                return [
-                    'id' => $best['id'],
-
-                    // 🔥 SIGNALS
-                    'score' => $best['score'] ?? 0,
-                    'rrf_score' => $best['rrf_score'] ?? 0,
-                    'vector_score' => $best['vector_score'] ?? 0,
-                    'keyword_score' => $best['keyword_score'] ?? 0,
-                    'multi_query_bonus' => $best['multi_query_bonus'] ?? 0,
-
-                    // meta
-                    'text' => $best['text'] ?? '',
-                    'priority' => $best['priority'] ?? 100,
-                    'source_type' => $best['source_type'] ?? 'unknown',
-                    'metadata' => $best['metadata'] ?? null,
-                    'payload' => $best['payload'] ?? null,
-                    'source' => $best['source'] ?? null,
-                    'length' => $best['length'] ?? null,
-                    'embedding' => $best['embedding'] ?? null,
-                ];
-            })
-            ->sortByDesc('score')
+        // 🔥 diversité par source / entité
+        return collect($hydrated)
+            ->groupBy(fn($r) => $r['metadata']['entity'] ?? 'generic')
+            ->map(fn($group) => collect($group)->take(2))
+            ->flatten(1)
             ->values()
             ->toArray();
     }
-    protected function shouldStop(array $state, array $lastResults): bool
+    protected function ingestEvidence(array $state, array $results, string $objective): array
     {
-        if ($state['hop'] >= 3) {
-            return true;
+        foreach ($results as $chunk) {
+
+            $state['visited_ids'][] = $chunk['id'];
+
+            $state['keywords'] = array_slice(
+                array_unique(array_merge(
+                    $state['keywords'],
+                    $this->extractKeywords($chunk['text'])
+                )),
+                0,
+                50
+            );
+
+            $state['evidence'][] = [
+                'id' => $chunk['id'],
+                'text' => $chunk['text'],
+                'score' => $chunk['score'] ?? 0,
+                'vector_score' => $chunk['vector_score'] ?? 0,
+                'keyword_score' => $chunk['keyword_score'] ?? 0,
+                'rrf_score' => $chunk['rrf_score'] ?? 0,
+                'multi_query_bonus' => $chunk['multi_query_bonus'] ?? null,
+                'objective' => $objective,
+                'source_type' => $chunk['source_type'] ?? 'unknown',
+                'payload' => $chunk['payload'] ?? null,
+                'priority' => $chunk['priority'] ?? 100,
+                'metadata' => $chunk['metadata'] ?? null,
+                'source' => $chunk['source'] ?? null,
+                'length' => strlen($chunk['text']),
+                'embedding' => $chunk['embedding'] ?? null,
+            ];
+
+            $state['evidence_by_objective'][$objective][] = $chunk['id'];
         }
 
-        $lastIds = collect($lastResults)->pluck('id');
+        return $state;
+    }
+    protected function evaluateState(array $state, array $results): array
+    {
+        $state['confidence'] = $this->computeConfidence($state);
 
-        $newIds = $lastIds->filter(fn($id) => !in_array($id, $state['visited_ids']));
-
-        if ($newIds->count() < 3) {
-            return true;
+        foreach ($state['objectives'] as $obj) {
+            $state['objective_scores'][$obj] = $this->scoreObjective($obj, $state);
         }
 
-        return false;
+        return $state;
+    }
+    protected function scoreObjective(string $obj, array $state): float
+    {
+        return $this->hasEvidenceFor($obj, $state)
+            ? 1.0
+            : 0.0;
+    }
+    protected function buildFinalContext(array $state): array
+    {
+        return collect($state['evidence'])
+            ->map(function ($e, $i) use ($state) {
+
+                return [
+                    'id' => $e['id'] ?? $i,
+                    'text' => $e['text'],
+                    'objective' => $e['objective'],
+
+                    // 🔥 IMPORTANT pour RetrievalOptimizer
+                    'score' => $e['score'] ?? 0,
+                    'vector_score' => $e['vector_score'] ?? 0,
+                    'keyword_score' => $e['keyword_score'] ?? 0,
+                    'rrf_score' => $e['rrf_score'] ?? 0,
+                    'multi_query_bonus' => $e['multi_query_bonus'] ?? null,
+
+                    'source_type' => $e['source_type'] ?? 'unknown',
+                    'payload' => $e['payload'] ?? null,
+                    'priority' => $e['priority'] ?? 100,
+                    'metadata' => $e['metadata'] ?? null,
+                    'source' => $e['source'] ?? null,
+                    'length' => strlen($e['text']),
+                    'embedding' => $e['embedding'] ?? null,
+                ];
+            })
+            ->values()
+            ->toArray();
+    }
+    protected function extractKeywords(string $text): array
+    {
+        $text = strtolower($text);
+
+        $tokens = preg_split('/[\s,.;:!?()]+/', $text);
+
+        return array_values(array_filter($tokens, fn($t) => strlen($t) > 4));
     }
     public function shouldUseMultiHop(QueryPlan $queryPlan): bool
     {
         $this->queryPlan = $queryPlan;
         // 1️⃣ Heuristique rapide
-        $heuristic = $this->heuristicDecision($queryPlan);
+        $heuristic = $this->heuristicDecision();
 
         if ($heuristic !== null) {
             return $heuristic;
@@ -312,9 +500,9 @@ Contraintes:
         }
 
         // 🔥 complexité évidente
-        if (!empty($this->queryPlan->subQueries) && count($this->queryPlan->subQueries) > 1) {
+        /*if (!empty($this->queryPlan->subQueries) && count($this->queryPlan->subQueries) > 1) {
             return true;
-        }
+        }*/
 
         // 🔥 stratégie déjà détectée
         if ($this->queryPlan->searchStrategy === 'decomposition') {
@@ -322,7 +510,7 @@ Contraintes:
         }
 
         // ❓ incertain → laisser LLM décider
-        return null;
+        return false;
     }
     protected function llmDecision(): bool
     {
@@ -366,5 +554,142 @@ YES ou NO
 
         // 🔥 fallback sécurisé
         return false;
+    }
+    protected function parseObjective(string $objective): array
+    {
+        if (str_contains($objective, ':')) {
+            return explode(':', $objective, 2);
+        }
+
+        return ['generic', $objective];
+    }
+    protected function isComplete(array $state): bool
+    {
+        // 🔥 1. tous les objectifs couverts
+        $coverageRatio = count($state['covered_objectives']) / max(count($state['objectives']), 1);
+        $state['confidence'] = $this->computeConfidence($state);
+
+        if ($coverageRatio < 0.8) {
+            return false;
+        }
+
+        // 🔥 2. confiance minimale
+        if ($state['confidence'] < 0.3) {
+            return false;
+        }
+
+        // 🔥 3. diversité des sources
+        $sourceTypes = collect($state['evidence'])
+            ->pluck('source_type')
+            ->unique()
+            ->count();
+
+        if ($sourceTypes < 1) {
+            return false;
+        }
+
+        // 🔥 4. éviter arrêt prématuré
+        if ($state['hop'] < 1) {
+            return false;
+        }
+
+        return true;
+    }
+    protected function hasEvidenceFor(string $objective, array $state): bool
+    {
+        $evidence = $state['evidence'];
+        if (empty($evidence)) return false;
+
+        // 🔥 1. parsing objectif
+        [$type, $value] = $this->parseObjective($objective);
+
+        // 🔥 2. embedding objectif
+        $objectiveEmbedding = $state['objective_embeddings'][$objective] ?? null;
+        if (!$objectiveEmbedding) {
+            return false; // sécurité
+        }
+
+        // 🔥 3. scorer chaque evidence
+        $scores = collect($evidence)->map(function ($e) use ($objectiveEmbedding) {
+
+            if (empty($e['embedding'])) {
+                return 0;
+            }
+
+            return $this->cosineSimilarity(
+                $objectiveEmbedding,
+                $e['embedding']
+            );
+        });
+
+        // 🔥 4. prendre les meilleurs
+        $topScores = $scores->sortDesc()->take(3);
+        $avgTop = $topScores->avg();
+
+        return $avgTop >= $this->getThresholdForObjective($type);
+    }
+    protected function cosineSimilarity(array $a, array $b): float
+    {
+        $dot = 0;
+        $normA = 0;
+        $normB = 0;
+
+        foreach ($a as $i => $val) {
+            $dot += $val * ($b[$i] ?? 0);
+            $normA += $val * $val;
+            $normB += ($b[$i] ?? 0) * ($b[$i] ?? 0);
+        }
+
+        if ($normA == 0 || $normB == 0) return 0;
+
+        return $dot / (sqrt($normA) * sqrt($normB));
+    }
+    protected function getThresholdForObjective(string $type): float
+    {
+        return match($type) {
+            'constraint' => 0.75,
+            'features' => 0.7,
+            'comparison' => 0.73,
+            default => 0.72,
+        };
+    }
+    protected function ensureObjectiveEmbeddings(array &$state): void
+    {
+        foreach ($state['objectives'] as $obj) {
+
+            if (!isset($state['objective_embeddings'][$obj])) {
+
+                $state['objective_embeddings'][$obj] =
+                    $this->embeddingService->getEmbedding($obj);
+            }
+        }
+    }
+    protected function computeConfidence(array $state): float
+    {
+        $coverage = count($state['covered_objectives']) /
+            max(count($state['objectives']), 1);
+
+        $quality = collect($state['evidence'])
+            ->avg(fn($e) => $e['score'] ?? 0);
+
+        $diversity = collect($state['evidence'])
+                ->pluck('source_type')
+                ->unique()
+                ->count() / 3;
+
+        return round(
+            ($coverage * 0.5) +
+            ($quality * 0.3) +
+            ($diversity * 0.2),
+            3
+        );
+    }
+    protected function getFinalChunks(array $state): array
+    {
+        return collect($state['evidence'])
+            ->groupBy('id')
+            ->map(fn($items) => $items->last())
+            ->values()
+            ->toArray();
     }
 }

@@ -39,7 +39,8 @@ class QueryAnalyzer
                 "needs_conversation_context" => false,
                 "filters" => [],
                 "top_k" => 30,
-                "search_strategy" => "single"
+                "search_strategy" => "single",
+                "constraints" => []
             ];
         }
 
@@ -79,6 +80,7 @@ class QueryAnalyzer
         4. Sub-queries if multiple information needs exist
         5. Filters (ONLY if explicitly or implicitly required)
         6. Retrieval strategy (based on query complexity)
+        7. Constraints (explicit or implicit limits such as budget, time, region, compliance, performance, etc.)
 
         =================
         OUTPUT FORMAT
@@ -115,7 +117,9 @@ class QueryAnalyzer
 
           "top_k": 30,
 
-          "search_strategy": "single | multi_query | decomposition"
+          "search_strategy": "single | multi_query | decomposition",
+
+          "constraints": []
         }
 
         =================
@@ -130,6 +134,38 @@ class QueryAnalyzer
         - Avoid redundancy in search_queries
         - Max 5 search_queries
         - Max 5 sub_queries
+
+        =================
+        OVERRIDE RULE (CRITICAL)
+        =================
+
+        If intent = "comparison":
+        - search_strategy MUST be "decomposition"
+        - sub_queries MUST NOT be empty
+
+        =================
+        IMPLICIT CONSTRAINT DETECTION (CRITICAL)
+        =================
+
+        If the query includes:
+        - sleeping position (side, back, stomach)
+        - comfort preferences
+        - usage context
+
+        THEN:
+        - MUST add them into "constraints"
+
+        =================
+        SUB-QUERY GENERATION RULES (MANDATORY FOR COMPARISON)
+        =================
+
+        For comparison queries, generate at least 3 sub_queries:
+
+        1. "'product A' caractéristiques"
+        2. "'product B' caractéristiques"
+        3. "'constraint' recommandation produit"
+
+        Sub_queries must NOT be empty.
 
         =================
         QUERY OPTIMIZATION RULES
@@ -161,6 +197,14 @@ class QueryAnalyzer
         - clearly implied (e.g. "latest", "enterprise plan")
 
         Otherwise keep filters empty.
+
+        =================
+        CONSTRAINTS RULES
+        =================
+
+        Extract constraints ONLY when:
+        - explicitly stated (e.g. "under $100", "in Europe", "GDPR compliant")
+        - clearly implied (e.g. "fastest", "low latency", "high accuracy")
 
         =================
         SEARCH STRATEGY RULES
@@ -236,6 +280,10 @@ class QueryAnalyzer
         $plan->topK = intval($data['top_k'] ?? 30);
 
         $plan->searchStrategy = $data['search_strategy'] ?? 'single';
+
+        $plan->constraints = is_array($data['constraints'] ?? null)
+            ? $data['constraints']
+            : [];
 
         return $plan;
     }
@@ -333,7 +381,8 @@ class QueryAnalyzer
             "needs_conversation_context" => false,
             "filters" => [],
             "top_k" => 30,
-            "search_strategy" => "single"
+            "search_strategy" => "single",
+            "constraints" => []
         ]);
     }
 
