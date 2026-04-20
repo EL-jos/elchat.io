@@ -2,6 +2,7 @@
 
 namespace App\Services\ia;
 
+use App\Models\Chunk;
 use Illuminate\Support\Facades\Log;
 
 class ContextBuilder
@@ -45,7 +46,7 @@ class ContextBuilder
             // 🔥 Score de pertinence
             $score = round($chunk['final_score'] ?? 0, 3);
             // 🔥 Importance label
-            $importance = $score > 0.8 ? 'HIGH' : ($score > 0.6 ? 'MEDIUM' : 'LOW');
+            $importance = $score >= 0.8 ? 'HIGH' : ($score >= 0.6 ? 'MEDIUM' : 'LOW');
 
 
             $metadata = $chunk['metadata'] ?? [];
@@ -62,8 +63,23 @@ class ContextBuilder
                 $metadata = [];
             }
 
-            $title = $metadata['title'] ?? null;
-            $url = $metadata['url'] ?? null;
+            $title = null;
+            $url = null;
+
+            if($sourceType === 'product'){
+                $product = Chunk::find($chunk['id'])->product;
+
+                $title = $product->product_name ?? null;
+                $url = $product->product_url ?? null;
+            }elseif ($sourceType === 'webpage'){
+                $page = Chunk::find($chunk['id'])->page;
+
+                $title = $page->title ?? null;
+                $url = $page->url ?? null;
+            }else{
+                $title = $metadata['title'] ?? null;
+                $url = $metadata['url'] ?? null;
+            }
 
             $header = "DOCUMENT {$docIndex}\n";
             $header .= "TYPE: {$sourceType}\n";

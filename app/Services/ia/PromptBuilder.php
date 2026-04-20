@@ -16,7 +16,8 @@ class PromptBuilder
         array $history = [],
         ?Conversation $conversation = null,
         ?array $cats = [],
-        ?array $entities = []
+        ?array $entities = [],
+        ?array $extra = []
     ): array {
 
         $messages = [];

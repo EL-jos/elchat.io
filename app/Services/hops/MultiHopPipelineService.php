@@ -1,9 +1,10 @@
 <?php
 
-namespace App\Services\queryAnalyzer;
+namespace App\Services\hops;
 
 use App\Models\Conversation;
 use App\Models\Site;
+use App\Models\UnansweredQuestion;
 use App\Services\chunks\ChunkHydrationService;
 use App\Services\chunks\ChunkRankingService;
 use App\Services\cta\CTAEngine;
@@ -15,10 +16,10 @@ use App\Services\ia\EntityExtractor;
 use App\Services\ia\EntityRelevanceService;
 use App\Services\ia\EntityResolver;
 use App\Services\ia\PromptBuilder;
+use App\Services\queryAnalyzer\QueryPlan;
 use App\Services\rag\ContextSelectionService;
 use App\Services\rag\LLMReRankerService;
 use App\Services\rag\RetrievalOptimizer;
-use Exception;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -42,7 +43,7 @@ class MultiHopPipelineService
         protected CTARelevanceService $CTARelevanceService,
         protected PromptBuilder $promptBuilder,
     ){}
-    public function handle(string $question, QueryPlan $plan, Site $site, Conversation $conversation = null, array $history = [],): array
+    public function handle(string $question, QueryPlan $plan, Site $site, Conversation $conversation = null, array $history = [],): HopResponse
     {
         $state = $this->initState($plan);
 
@@ -82,6 +83,21 @@ class MultiHopPipelineService
                 chunks: $results,
                 topK: 15
             );
+            // 3️⃣ Fallback si rien trouvé
+            if (empty($results)) {
+                UnansweredQuestion::create([
+                    'site_id' => $site->id,
+                    'question' => $question,
+                ]);
+
+                //dd(empty($qdrantResults), $qdrantResults, $site->id, floatval($site->settings->min_similarity_score));
+                return new HopResponse(
+                    message: "Je n’ai pas trouvé cette information dans les données de notre entreprise.
+                        N’hésitez pas à nous préciser votre besoin ou à nous contacter directement.",
+                    ctas: [],
+                    entities: []
+                );
+            }
             $results = array_values(array_filter($results, function ($c) {
                 if (!isset($c['id'])) {
                     Log::warning('Chunk sans ID supprimé', ['chunk' => $c]);
@@ -162,6 +178,13 @@ class MultiHopPipelineService
         Log::info("CONTEXT BUILDER", [
             'context' => $context
         ]);
+        if (trim($context) === '') {
+            return new HopResponse(
+                message: "Je n’ai pas d’information fiable à ce sujet pour le moment.",
+                ctas: [],
+                entities: []
+            );
+        }
 
         $state['entities'] = $entities;
         $state['ctas'] = $ctas;
@@ -176,15 +199,17 @@ class MultiHopPipelineService
             cats: $ctas ?? [],
             entities: $entities ?? []
         );
-        //Log::info("Prompt Payload:", $prompt);
+        Log::info("Prompt Payload:", [
+            "prompt" => $prompt,
+        ]);
 
-        return [
-            'context' => $context,
-            'entities' => $entities,
-            'prompt' => $prompt,
-            'state' => $this->buildFinalContext($state),
-            'ctas' => $ctas,
-        ];
+        return new HopResponse(
+            prompt: $prompt,
+            ctas: $ctas,
+            entities: $entities,
+            context: $context
+        );
+
     }
     protected function initState(QueryPlan $plan): array
     {
@@ -502,12 +527,12 @@ class MultiHopPipelineService
         // 🔥 complexité évidente
         /*if (!empty($this->queryPlan->subQueries) && count($this->queryPlan->subQueries) > 1) {
             return true;
-        }*/
+        }
 
         // 🔥 stratégie déjà détectée
         if ($this->queryPlan->searchStrategy === 'decomposition') {
             return true;
-        }
+        }*/
 
         // ❓ incertain → laisser LLM décider
         return false;

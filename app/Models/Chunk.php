@@ -20,4 +20,11 @@ class Chunk extends BaseModel
     public function site(){
         return $this->belongsTo(Site::class);
     }
+    public function product(){
+        return $this->belongsTo(Product::class);
+    }
+
+    public function document(){
+        return $this->belongsTo(Document::class);
+    }
 }

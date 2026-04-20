@@ -4,27 +4,18 @@ namespace App\Services\ia;
 use App\Models\Conversation;
 use App\Models\Message;
 use App\Models\Site;
-use App\Models\UnansweredQuestion;
 use App\Models\WidgetSetting;
-use App\Services\chunks\ChunkHydrationService;
-use App\Services\chunks\ChunkRankingService;
 use App\Services\cta\ChatResponse;
-use App\Services\cta\CTAEngine;
-use App\Services\cta\CTARelevanceService;
-use App\Services\hybrid\HybridSearchService;
+use App\Services\hops\HopResponse;
+use App\Services\hops\MultiHopPipelineService;
+use App\Services\hops\MultiHopPipelineServiceV2;
+use App\Services\hops\SingleHopPipelineService;
 use App\Services\queryAnalyzer\IntentRouter;
 use App\Services\queryAnalyzer\LeadService;
-use App\Services\queryAnalyzer\MultiHopPipelineService;
 use App\Services\queryAnalyzer\NavigationService;
 use App\Services\queryAnalyzer\QueryAnalyzer;
-use App\Services\queryAnalyzer\QueryPlan;
 use App\Services\queryAnalyzer\TransactionService;
-use App\Services\rag\ContextCompressor;
-use App\Services\rag\ContextSelectionService;
-use App\Services\rag\ContextValidator;
-use App\Services\rag\LLMReRankerService;
-use App\Services\rag\RetrievalOptimizer;
-use App\Services\vector\VectorSearchService;
+use App\Services\validator\AnswerValidatorService;
 use App\Traits\TextNormalizer;
 use Exception;
 use Illuminate\Http\Client\RequestException;
@@ -61,39 +52,23 @@ class ChatService
             'priority' => 3,
         ],
     ];
+    protected HopResponse $results;
 
     public function __construct(
-        protected EmbeddingService $embeddingService,
-        protected PromptBuilder $promptBuilder,
-        protected VectorSearchService $vectorSearchService,
-        protected ChunkHydrationService $chunkHydrationService,
-        protected ChunkRankingService $chunkRankingService,
-        protected ContextBuilder $contextBuilder,
-        protected FollowUpDetector $followUpDetector,
-        protected ConversationRewriterService $rewriter,
-        protected EntityResolver $entityResolver,
+
         protected IntentClassifier $intentClassifier,
         protected ConversationStateManager $conversationStateManager,
         protected ResponseGuard $responseGuard,
 
-
         protected QueryAnalyzer $queryAnalyzer,
-        protected RetrievalOptimizer $retrievalOptimizer,
-        protected ContextValidator $contextValidator,
-        protected ContextCompressor $contextCompressor,
-
         protected IntentRouter $intentRouter,
-        protected CTAEngine $CTAEngine,
-
-        protected EntityExtractor $entityExtractor,
-
-        protected EntityRelevanceService $entityRelevanceService,
-        protected CTARelevanceService $ctaRelevanceService,
-        protected HybridSearchService $hybridSearchService,
-        protected LLMReRankerService $LLMReRankerService,
-        protected ContextSelectionService $contextSelectionService,
 
         protected MultiHopPipelineService $multiHopPipelineService,
+        protected MultiHopPipelineServiceV2 $multiHopPipelineServiceV2,
+        protected SingleHopPipelineService $singleHopPipelineService,
+
+        protected AnswerValidatorService $answerValidatorService,
+        protected ConversationRewriterService $conversationRewriterService,
     )
     {}
 
@@ -142,297 +117,137 @@ class ChatService
             })
             ->toArray();
 
-        $queryPlan = $this->queryAnalyzer->analyze($question, $conversation);
-        Log::info("Query Plan Prepare", [
-            "original_question" => $question,
-            "queryPlan" => $queryPlan,
-        ]);
+        $attempts = [
+            ['type' => 'rag', 'rewrite' => false],
+            ['type' => 'rag', 'rewrite' => true],
+            ['type' => 'web', 'rewrite' => false],
+            ['type' => 'web', 'rewrite' => true],
+        ];
 
-        /*$route = $this->intentRouter->route($queryPlan, $site);
-        if (isset($this->handlers[$route])) {
+        $bestCandidate = null;
+        $bestScore = 0;
 
-            $handler = app($this->handlers[$route]);
+        foreach ($attempts as $i => $attempt) {
+            Log::info("🧠 Attempt #{$i}", [
+                "attempt" => $attempt,
+            ]);
 
-            return $handler->handle($question, $site, $conversation);
-        }
+            $currentQuestion = $attempt['rewrite']
+                ? $question = $this->conversationRewriterService->rewrite(question: $question, conversation: $conversation)
+                : $question;
+            Log::info("QUESTION", [
+                "question" => $currentQuestion,
+            ]);
+            $queryPlan = $this->queryAnalyzer->analyze($currentQuestion, $conversation);
+            Log::info("Query Plan Prepare", [
+                "original_question" => $question,
+                "queryPlan" => $queryPlan,
+            ]);
+            // ─────────────────────────────
+            // 1️⃣ Retrieval
+            // ─────────────────────────────
+            //if ($attempt['type'] === 'rag') {
 
-        $topK = match($queryPlan->intent) {
-            'pricing' => 5,
-            'comparison' => 12,
-            'information' => 8,
-            default => 6
-        };*/
+            $this->results = $this->multiHopPipelineService->shouldUseMultiHop(queryPlan: $queryPlan)
+                ? $this->multiHopPipelineServiceV2->handle(
+                    question: $currentQuestion,
+                    plan: $queryPlan,
+                    site: $site,
+                    conversation: $conversation,
+                    history: $history
+                )
+                : $this->singleHopPipelineService->handle(
+                    question: $currentQuestion,
+                    queryPlan: $queryPlan,
+                    site: $site,
+                    conversation: $conversation,
+                    history: $history
+                );
 
-        $query = $queryPlan->cleanQuery;
-        /*Log::info("QueryPlan", [
-            "clean_query" => $queryPlan->cleanQuery,
-            "strategy" => $queryPlan->searchStrategy,
-            "queries" => $queryPlan->searchQueries,
-            "sub_queries" => $queryPlan->subQueries,
-            "top_k" => $queryPlan->topK
-        ]);*/
-        $queries = null;
-        switch ($queryPlan->searchStrategy) {
-            case 'decomposition':
-                $queries = $queryPlan->subQueries ?: [$queryPlan->cleanQuery];
-                break;
-            case 'multi_query':
-                $queries = $queryPlan->searchQueries ?: [$queryPlan->cleanQuery];
-                break;
-            default:
-                $queries = [$queryPlan->cleanQuery];
-        }
-        /*Log::info("Queries", [
-            "queries" => $queries,
-        ]);*/
+            /*} else {
 
-        // ─────────────────────────────
-        // 2️⃣ Retrieval (Single ou Multi-hop)
-        // ─────────────────────────────
-        $promptPayload = [];
-        $entities = [];
-        $ctas = [];
-        if($this->multiHopPipelineService->shouldUseMultiHop(queryPlan: $queryPlan)){
-            Log::info("🚀 Multi-hop pipeline activated");
-            $results = $this->multiHopPipelineService->handle(
-                question: $question,
-                plan: $queryPlan,
+                //$results = $this->webSearchService->search($currentQuestion);
+                $this->results = new HopResponse();
+            }*/
+
+            if (is_null($this->results->prompt) || (!is_null($this->results->message))) {
+                continue;
+            }
+
+            // ─────────────────────────────
+            // 9️⃣ Appel LLM
+            // ─────────────────────────────
+            $response = $this->callLLM(
                 site: $site,
-                conversation: $conversation,
-                history: $history
-            );
-            //Log::info("Dans CHAT SERVICE - Prompt Payload:", $promptPayload);
-            $promptPayload = $results['prompt'];
-            $entities = $results['entities'];
-            $ctas = $results['ctas'];
-        }else{
-            $resultsMap = [];
-
-            foreach ($queries as $q) {
-
-                $embedding = $this->embeddingService->getEmbedding($q);
-
-                $partial = $this->hybridSearchService->search(
-                    query: $q,
-                    embedding: $embedding,
-                    siteId: $site->id,
-                    limit: $queryPlan->topK ?? 30,
-                    scoreThreshold: floatval($site->settings->min_similarity_score),
-                );
-
-                foreach ($partial as $item) {
-
-                    $id = $item['id'];
-
-                    if (!isset($resultsMap[$id])) {
-                        $resultsMap[$id] = $item;
-
-                        $resultsMap[$id]['hit_count'] = 0;
-                        $resultsMap[$id]['multi_query_score'] = 0;
-                    }
-
-                    // 🔥 count occurrences
-                    $resultsMap[$id]['hit_count']++;
-
-                    // 🔥 léger bonus par présence multi-query
-                    $resultsMap[$id]['multi_query_score'] += 1;
-                }
-            }
-
-            $resultsHybridSearch = collect($resultsMap)
-                ->map(function ($item) {
-
-                    $hits = $item['hit_count'] ?? 1;
-
-                    $item['multi_query_bonus'] = min(0.15, log(1 + $hits) * 0.05);
-
-                    // 🔥 UPDATE GLOBAL SCORE
-                    $item['score'] = ($item['rrf_score'] ?? 0) + $item['multi_query_bonus'];
-
-                    return $item;
-                })
-                ->sortByDesc('score')
-                ->values()
-                ->toArray();
-            //Log::info("APRES RECHERCHE HYBRIDE APRES CLASSEMENT", $resultsHybridSearch);
-
-            // ─────────────────────────────
-            // 5️⃣ Hydratation
-            // ─────────────────────────────
-            $hydrated = $this->chunkHydrationService->hydrate($resultsHybridSearch);
-            //Log::info("Hydrated Chunks :", $hydrated);
-            $historyMessagesResults = [];
-            $hydratedMessages = $this->chunkHydrationService->hydrateMessages($historyMessagesResults);
-            //Log::info("Hydrated Messages :", $hydratedMessages);
-
-            $resultsOptimizer = $this->retrievalOptimizer->optimize(
-                $hydrated,
-                $queryPlan
-            );
-            //Log::info("Optimized Results", $resultsOptimizer);
-
-            $resultsReRanker = $this->LLMReRankerService->rerank(
-                query: $query,
-                chunks: $resultsOptimizer,
-                topK: 12
-            );
-            //Log::info("ReRanking Results", $resultsReRanker);
-
-            // 3️⃣ Fallback si rien trouvé
-            if (empty($resultsReRanker)) {
-                UnansweredQuestion::create([
-                    'site_id' => $site->id,
-                    'question' => $question,
-                ]);
-
-                //dd(empty($qdrantResults), $qdrantResults, $site->id, floatval($site->settings->min_similarity_score));
-                return new ChatResponse(
-                    message: "Je n’ai pas trouvé cette information dans les données de notre entreprise.
-            N’hésitez pas à nous préciser votre besoin ou à nous contacter directement.",
-                    ctas: []
-                );
-            }
-
-            // ─────────────────────────────
-            // 6️⃣ Ranking métier
-            // ─────────────────────────────
-            $ragContextChunks = $this->chunkRankingService->rank($resultsReRanker, floatval($site->settings->min_similarity_score));
-            //Log::info("RAG CONTEXT CHUNKS", $ragContextChunks);
-
-            $resultsContextSelection = $this->contextSelectionService->select(
-                $ragContextChunks,
-                $queryPlan,
-                10
-            );
-            //Log::info("CHUNKS SELECT", $resultsContextSelection);
-
-            $ragContextChunks = $this->entityResolver->resolve(collect($resultsContextSelection));
-            $entities = $this->entityExtractor->extract($ragContextChunks);
-            //Log::info("ENTITIES RECUPERER: ",  $entities);
-            $ragContextMessages = collect($hydratedMessages)->sortByDesc('vector_score')->take(5)->toArray();
-
-            // Après avoir hydraté et résolu les entités
-            $ragContextChunks = collect($ragContextChunks)
-                ->map(fn($chunk) => [
-                    ...$chunk,
-                    'text' => $chunk['text'],
-                ])->toArray();
-            $ragContextMessages = collect($ragContextMessages)
-                ->map(fn($msg) => [
-                    ...$msg,
-                    'text' => $msg['text'],
-                ])->toArray();
-
-
-            // ─────────────────────────────
-            // 7️⃣ Fusion + limite globale
-            // ─────────────────────────────
-            $allContextChunks = collect(array_merge($ragContextChunks, $ragContextMessages))
-                ->sortByDesc(function ($c) {
-                    $score = $c['final_score'] ?? $c['vector_score'] ?? $c['score'] ?? 0;
-
-                    // 🔥 pénaliser messages légèrement
-                    if (($c['type'] ?? null) === 'message') {
-                        $score *= 0.8;
-                    }
-
-                    // 🔥 pénaliser alias fort
-                    if (($c['type'] ?? null) === 'statistical_alias') {
-                        $score *= 0.6;
-                    }
-
-                    return $score;
-                })
-                ->toArray();
-            $maxChunks = 10; // chunks + messages
-            $allContextChunks = array_slice($allContextChunks, 0, $maxChunks);
-            // Construire le contexte final pour le LLM
-            $context = $this->contextBuilder->build($allContextChunks);
-            /*Log::info("CONTEXT BUILDER", [
-                'context' => $context
-            ]);*/
-
-            if (trim($context) === '') {
-                return new ChatResponse(
-                    message: "Je n’ai pas d’information fiable à ce sujet pour le moment.",
-                    ctas: []
-                );
-            }
-
-            $entities = $this->entityRelevanceService->filterRelevant(
-                $entities,
-                $query,
-                $queryPlan->entities ?? []
-            );
-            $ctas = $this->CTAEngine->resolve($site, $queryPlan, $conversation);
-            //Log::info("Resolved CTAs:", ['ctas' => $ctas]);
-            $ctas = $this->ctaRelevanceService->filterRelevant(
-                $ctas,
-                $queryPlan,
-                $query,
-                $entities
+                prompt: $this->results->prompt,
+                question: $question
             );
 
             // ─────────────────────────────
-            // 8️⃣ Construction Prompt
+            // 🔟 Response Guard (anti-boucle)
             // ─────────────────────────────
+            $validatedResponse = $this->responseGuard->validate($response, $conversation);
 
-            $promptPayload = $this->promptBuilder->build(
-                site: $site,
+            $validation = $this->answerValidatorService->validate(
                 question: $question,
-                context: $context,
-                history: $history,
-                conversation: $conversation,
-                cats: $ctas,
-                entities: $entities
+                answer: $response,
+                context: $this->results->context
             );
 
-            //Log::info("Prompt Payload:", $promptPayload);
-        }
+            $score = $validation['final_score'] ?? 0;
 
-
-        // ─────────────────────────────
-        // 9️⃣ Appel LLM
-        // ─────────────────────────────
-        $response =  $this->callLLM(
-            site: $site,
-            prompt: $promptPayload,
-            question: $question
-        );
-
-        // ─────────────────────────────
-        // 🔟 Response Guard (anti-boucle)
-        // ─────────────────────────────
-        $validatedResponse = $this->responseGuard->validate($response, $conversation);
-
-        Log::info("REPONSE AVEC CTA OU PAS et ENTITIES OU PAS", [
-            "content" => $validatedResponse,
-            "ctas" => $ctas,
-            "entities" => $entities,
-        ]);
-
-        // Si réponse vide / non disponible mais entities présentes
-        if ($validatedResponse ===  "Cette information n’est pas disponible dans nos documents internes.") {
-            // Ajoute un texte introductif pour contextualiser les entities
-
-            if (!empty($entities)){
-                $fallbackMessage = $this->buildEntitiesFallbackMessage($entities);
-
-                if ($fallbackMessage) {
-                    $validatedResponse = $fallbackMessage;
-                }
+            if ($validation['grounding'] < 0.4) {
+                // réponse plausible mais pas supportée
+            }
+            if ($validation['relevance'] < 0.5) {
+                // hors sujet
+            }
+            if ($validation['hallucination_risk'] > 0.6) {
+                Log::warning("⚠️ Hallucination détectée", $validation);
             }
 
-        } elseif (!empty($entities)) {
+            $score = $validation['final_score'];
 
-            $validatedResponse .= "\n\n---\n\n **Ressources utiles :**";
+            $hallucination = $validation['hallucination_risk'];
+
+            if ($hallucination < 0.3 && $score >= $site->settings->min_similarity_score) {
+                break;
+            }
+
+        }
+        // ─────────────────────────────
+        // 🧠 DECISION FINALE
+        // ─────────────────────────────
+        if ($validation >= $site->settings->min_similarity_score) {
+
+            if ($validatedResponse === "Cette information n’est pas disponible dans nos documents internes.") {
+                // Ajoute un texte introductif pour contextualiser les entities
+
+                if (!empty($this->results->entities)) {
+                    $fallbackMessage = $this->buildEntitiesFallbackMessage($this->results->entities);
+
+                    if ($fallbackMessage) {
+                        $validatedResponse = $fallbackMessage;
+                    }
+                }
+
+            } elseif (!empty($this->results->entities)) {
+
+                $validatedResponse .= "\n\n---\n\n **Ressources utiles :**";
+            }
+
+            return new ChatResponse(
+                message: $validatedResponse,
+                ctas: $this->results->ctas,
+                entities: $this->results->entities
+            );
         }
 
-        // Retour final avec CTAs
+        // 🔥 fallback intelligent
         return new ChatResponse(
-            message: $validatedResponse,
-            ctas: $ctas,
-            entities: $entities
+            message: "Je n’ai pas trouvé une réponse suffisamment fiable. Pouvez-vous préciser votre demande ?",
+            ctas: [],
+            entities: []
         );
     }
     /**
