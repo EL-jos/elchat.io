@@ -6,6 +6,7 @@ namespace App\Jobs\crawl;
 use App\Models\CrawlJob;
 use App\Models\Site;
 use App\Services\CrawlService;
+use App\Services\MercureService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -30,15 +31,35 @@ class CrawlSiteJob implements ShouldQueue
         $this->siteId = $siteId;
     }
 
-    public function handle(CrawlService $crawlService)
+    public function handle(CrawlService $crawlService, MercureService $mercureService)
     {
         $site = Site::findOrFail($this->siteId);
 
         // 1️⃣ Préparer toutes les URLs à crawler
         $allUrls = $crawlService->prepareQueue($site);
+        $total = count($allUrls);
+
+        $mercureService->post(
+            "site/{$site->id}/knowledge/indexing",
+            [
+                'type' => 'indexing_info',
+                'progress' => 0,
+                'message' => "{$total} pages détectées",
+                'done' => false
+            ]
+        );
 
         if (empty($allUrls)) {
             $site->update(['status' => 'ready']);
+            $mercureService->post(
+                "site/{$site->id}/knowledge/indexing",
+                [
+                    'type' => 'indexing_warning',
+                    'progress' => 100,
+                    'message' => "Aucune page trouvée",
+                    'done' => true
+                ]
+            );
             return;
         }
 

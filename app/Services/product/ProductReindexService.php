@@ -8,6 +8,7 @@ use App\Models\Product;
 use App\Models\Site;
 use App\Services\IndexService;
 use App\Services\lexical\LexicalIndexService;
+use App\Services\MercureService;
 use App\Services\vector\VectorIndexService;
 use App\Services\vector\VectorSearchService;
 use Illuminate\Pagination\LengthAwarePaginator;
@@ -22,6 +23,7 @@ class ProductReindexService
         protected IndexService $indexService,
         protected VectorIndexService $vectorIndexService,
         protected LexicalIndexService  $lexicalIndexService,
+        protected MercureService $mercureService,
     ) {}
     /**
      * Liste paginée des produits (chunks globaux uniquement)
@@ -162,6 +164,13 @@ class ProductReindexService
             '$product_id'   => $product->id,
         ]);
 
+        $this->mercureService->post("site/{$product->site->id}/products/indexing", [
+            'type' => 'indexing_progress',
+            'progress' => 10,
+            'message' => 'Démarrage de la ré-indexation ...',
+            'done' => false
+        ]);
+
         DB::beginTransaction();
 
         try {
@@ -171,6 +180,12 @@ class ProductReindexService
             | 1️⃣ Récupération anciens chunks
             |--------------------------------------------------------------------------
             */
+            $this->mercureService->post("site/{$product->site->id}/products/indexing", [
+                'type' => 'indexing_progress',
+                'progress' => 30,
+                'message' => 'Récupération anciens chunks ...',
+                'done' => false
+            ]);
 
             $oldChunks = Chunk::where('product_id', $product->id)
                 ->where('site_id', $product->site_id)
@@ -180,12 +195,19 @@ class ProductReindexService
             Log::info('[PRODUCT REINDEX] Anciens chunks trouvés', [
                 'count' => count($oldChunks)
             ]);
+            $nbChunks = count($oldChunks);
 
             /*
             |--------------------------------------------------------------------------
             | 2️⃣ Suppression Vector DB & Lexical DB
             |--------------------------------------------------------------------------
             */
+            $this->mercureService->post("site/{$product->site->id}/products/indexing", [
+                'type' => 'indexing_progress',
+                'progress' => 50,
+                'message' => "Suppression des anciens chunks ({$nbChunks}) dans Vector DB & Lexical DB ...",
+                'done' => false
+            ]);
 
             Log::info("ID's anciens chunks", [
                 "chunks old" => $oldChunks
@@ -201,6 +223,12 @@ class ProductReindexService
             | 3️⃣ Suppression MySQL
             |--------------------------------------------------------------------------
             */
+            $this->mercureService->post("site/{$product->site->id}/products/indexing", [
+                'type' => 'indexing_progress',
+                'progress' => 50,
+                'message' => "Suppression des anciens chunks ({$nbChunks}) dans Vector DB & Lexical DB ...",
+                'done' => false
+            ]);
 
             $site = Site::find($product->site_id);
 
@@ -220,6 +248,13 @@ class ProductReindexService
             $document = new Document([ 'id' => (string) Str::uuid(), 'path' => "unknown", 'type' => "other", 'extension' => "unknown"]);
             $document = $site->documents()->save($document);
 
+            $this->mercureService->post("site/{$product->site->id}/products/indexing", [
+                'type' => 'indexing_progress',
+                'progress' => 70,
+                'message' => "Nouvelle indexation du produit ...",
+                'done' => false
+            ]);
+
             $this->indexService->indexStandardProduct(
                 product: $product,
                 document: $document,
@@ -233,6 +268,12 @@ class ProductReindexService
             | 5️⃣ Vérification du chunk global
             |--------------------------------------------------------------------------
             */
+            $this->mercureService->post("site/{$product->site->id}/products/indexing", [
+                'type' => 'indexing_progress',
+                'progress' => 90,
+                'message' => "Vérification ...",
+                'done' => false
+            ]);
 
             $globalChunk = Chunk::where('product_id', $product->id)
                 ->where('source_type', 'woocommerce')
@@ -249,6 +290,12 @@ class ProductReindexService
             Log::info('[PRODUCT REINDEX] Succès', [
                 'product_id' => $product->id,
                 'product_index' => 50
+            ]);
+            $this->mercureService->post("site/{$product->site->id}/products/indexing", [
+                'type' => 'indexing_progress',
+                'progress' => 100,
+                'message' => "Réindexation terminée 🎉",
+                'done' => true
             ]);
 
             return [
@@ -272,6 +319,15 @@ class ProductReindexService
                 'product_index' => 50,
                 'error' => $e->getMessage()
             ]);
+
+            $this->mercureService->post(
+                "site/{$product->site->id}/products/indexing",
+                [
+                    'type' => 'indexing_error',
+                    'message' => $e->getMessage(),
+                    'done' => true
+                ]
+            );
 
             return [
                 'status' => 'error',

@@ -38,4 +38,8 @@ class Message extends BaseModel
         return $this->hasMany(MessageCTA::class)
             ->orderBy('position');
     }
+
+    public function chatFormSubmissions(){
+        return $this->hasMany(ChatFormSubmission::class);
+    }
 }

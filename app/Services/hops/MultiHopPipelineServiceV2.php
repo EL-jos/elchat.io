@@ -52,16 +52,16 @@ class MultiHopPipelineServiceV2
         // 🧠 1. PLAN (LLM)
         $objectives = $this->planObjectives($question, $plan);
 
-        $entitySeeds = array_filter(
-            array_map(fn($e) => $e['value'] ?? null, $plan->entities ?? []),
-            fn($v) => !empty($v) && strlen($v) > 2
-        );
+        $entitySeeds = array_values(array_filter(
+            array_map(fn($e) => $this->normalizeEntityValue($e), $plan->entities ?? []),
+            fn($v) => is_string($v) && strlen($v) > 2
+        ));
 
-        $seedQueries = array_unique(array_filter(array_merge(
+        $seedQueries = array_values(array_filter(array_unique(array_merge(
             $plan->searchQueries ?? [],
             $plan->subQueries ?? [],
             $entitySeeds
-        )));
+        )), fn($v) => is_string($v) && trim($v) !== ''));
 
         $state = $this->initState($objectives, $plan);
 
@@ -561,5 +561,17 @@ CONTENT;
         $total = max(count($state['objectives']), 1);
 
         return min(1.0, $completed / $total);
+    }
+    protected function normalizeEntityValue($e): ?string
+    {
+        if (is_array($e)) {
+            return $e['value'] ?? null;
+        }
+
+        if (is_string($e)) {
+            return $e;
+        }
+
+        return null;
     }
 }

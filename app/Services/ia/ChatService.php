@@ -69,6 +69,9 @@ class ChatService
 
         protected AnswerValidatorService $answerValidatorService,
         protected ConversationRewriterService $conversationRewriterService,
+
+        protected FollowUpDetector $followUpDetector,
+        protected RetrievalQueryExpander $retrievalQueryExpander,
     )
     {}
 
@@ -93,10 +96,40 @@ class ChatService
         }
 
         // ─────────────────────────────
-        // 1️⃣ Récupération historique court
+        // 1️⃣ Context Resolution (ONE TIME ONLY)
+        // ─────────────────────────────
+        $resolvedQuestion = $question;
+
+        $followUp = $this->followUpDetector->isFollowUp(question: $question, conversation: $conversation);
+        if($followUp){
+            $resolvedQuestion = $this->conversationRewriterService->rewrite(question: $question, conversation: $conversation);
+        }
+
+        /*Log::info('Resolved Question', [
+            'original' => $question,
+            'resolved' => $resolvedQuestion,
+            'follow_up' => $followUp,
+        ]);*/
+
+        // ─────────────────────────────
+        // 2️⃣ Query Analysis
+        // ─────────────────────────────
+        $baseQueryPlan  = $this->queryAnalyzer->analyze(question: $resolvedQuestion, conversation: $conversation);
+
+        // ─────────────────────────────
+        // 3️⃣ Retrieval Expansion
+        // ONLY used if previous attempt hallucinated
+        // ─────────────────────────────
+        $queries = array_values(array_unique([
+            $resolvedQuestion,
+            ...$this->retrievalQueryExpander->expand(query: $resolvedQuestion)
+        ]));
+
+        // ─────────────────────────────
+        // 4️⃣ Short History
         // ─────────────────────────────
         $history = Message::where('conversation_id', $conversation->id)
-            ->orderBy('created_at',)
+            ->orderBy('created_at', 'desc')
             //->skip(1)
             ->take(6)
             ->get()
@@ -117,38 +150,61 @@ class ChatService
             })
             ->toArray();
 
-        $attempts = [
-            ['type' => 'rag', 'rewrite' => false],
-            ['type' => 'rag', 'rewrite' => true],
-            ['type' => 'web', 'rewrite' => false],
-            ['type' => 'web', 'rewrite' => true],
-        ];
-
-        $bestCandidate = null;
+        // ─────────────────────────────
+        // Runtime State
+        // ─────────────────────────────
         $bestScore = 0;
 
-        foreach ($attempts as $i => $attempt) {
-            Log::info("🧠 Attempt #{$i}", [
-                "attempt" => $attempt,
+        $bestResponse = null;
+
+        $bestValidation = null;
+
+        $bestResults = null;
+
+        $bestValidatedResponse = null;
+
+        $previousHallucination = true;
+
+        Log::info('Resolved Question', [
+            'original' => $question,
+            'resolved' => $resolvedQuestion,
+            'follow_up' => $followUp,
+            'baseQueryPlan' => $baseQueryPlan,
+            'queries' => $queries
+
+        ]);
+
+        // ─────────────────────────────
+        // 5️⃣ Retrieval Attempts
+        // ─────────────────────────────
+
+        foreach ($queries as $attemptIndex => $currentQuestion) {
+
+            // IMPORTANT:
+            // only continue attempts if previous failed
+            // due to hallucination / grounding issue
+            if (
+                $attemptIndex > 0
+                && $previousHallucination === false
+            ) {
+                break;
+            }
+
+            Log::info('🧠 Retrieval Attempt', [
+                'attempt' => $attemptIndex + 1,
+                'question' => $currentQuestion,
             ]);
 
-            $currentQuestion = $attempt['rewrite']
-                ? $question = $this->conversationRewriterService->rewrite(question: $question, conversation: $conversation)
-                : $question;
-            Log::info("QUESTION", [
-                "question" => $currentQuestion,
-            ]);
-            $queryPlan = $this->queryAnalyzer->analyze($currentQuestion, $conversation);
-            Log::info("Query Plan Prepare", [
-                "original_question" => $question,
-                "queryPlan" => $queryPlan,
-            ]);
-            // ─────────────────────────────
-            // 1️⃣ Retrieval
-            // ─────────────────────────────
-            //if ($attempt['type'] === 'rag') {
+            // Re-analyze current retrieval variant
+            $queryPlan = $attemptIndex === 0
+                ? $baseQueryPlan
+                : $this->queryAnalyzer->analyze(question: $currentQuestion, conversation: $conversation);
 
-            $this->results = $this->multiHopPipelineService->shouldUseMultiHop(queryPlan: $queryPlan)
+            // ─────────────────────────────
+            // 6️⃣ Retrieval
+            // ─────────────────────────────
+
+            $results = $this->multiHopPipelineService->shouldUseMultiHop(queryPlan: $queryPlan)
                 ? $this->multiHopPipelineServiceV2->handle(
                     question: $currentQuestion,
                     plan: $queryPlan,
@@ -164,39 +220,72 @@ class ChatService
                     history: $history
                 );
 
-            /*} else {
-
-                //$results = $this->webSearchService->search($currentQuestion);
-                $this->results = new HopResponse();
-            }*/
-
-            if (is_null($this->results->prompt) || (!is_null($this->results->message))) {
+            if (is_null($results->prompt) || (!is_null($results->message))) {
                 continue;
             }
 
             // ─────────────────────────────
-            // 9️⃣ Appel LLM
+            // 7️⃣ Generation
             // ─────────────────────────────
             $response = $this->callLLM(
                 site: $site,
-                prompt: $this->results->prompt,
-                question: $question
+                prompt: $results->prompt,
+                question: $resolvedQuestion
             );
 
             // ─────────────────────────────
-            // 🔟 Response Guard (anti-boucle)
+            // 8️⃣ Response Guard
             // ─────────────────────────────
-            $validatedResponse = $this->responseGuard->validate($response, $conversation);
+            $validatedResponse = $this->responseGuard->validate(response: $response, conversation: $conversation);
 
+            // ─────────────────────────────
+            // 9️⃣ Validation
+            // IMPORTANT:
+            // validate FINAL guarded response
+            // ─────────────────────────────
             $validation = $this->answerValidatorService->validate(
-                question: $question,
+                question: $resolvedQuestion,
                 answer: $response,
-                context: $this->results->context
+                context: $results->context
             );
 
             $score = $validation['final_score'] ?? 0;
+            $hallucination = $validation['hallucination_risk'] ?? 1;
+            $grounding = $validation['grounding'] ?? 0;
+            $relevance = $validation['relevance'] ?? 0;
 
-            if ($validation['grounding'] < 0.4) {
+            Log::info('Validation Result', [
+                'attempt' => $attemptIndex + 1,
+                'score' => $score,
+                'hallucination' => $hallucination,
+                'grounding' => $grounding,
+                'relevance' => $relevance,
+                'response' => $response
+            ]);
+
+            // Track best candidate
+            if ($score > $bestScore) {
+
+                $bestScore = $score;
+
+                $bestResponse = $response;
+
+                $bestValidation = $validation;
+
+                $bestResults = $results;
+
+                $bestValidatedResponse = $validatedResponse;
+            }
+
+            // ─────────────────────────────
+            // Determine retry condition
+            // ─────────────────────────────
+            $previousHallucination =
+                $hallucination >= 0.3
+                || $grounding < 0.4
+                || $relevance < 0.5;
+
+            /*if ($validation['grounding'] < 0.4) {
                 // réponse plausible mais pas supportée
             }
             if ($validation['relevance'] < 0.5) {
@@ -206,40 +295,61 @@ class ChatService
                 Log::warning("⚠️ Hallucination détectée", $validation);
             }
 
-            $score = $validation['final_score'];
-
             $hallucination = $validation['hallucination_risk'];
 
             if ($hallucination < 0.3 && $score >= $site->settings->min_similarity_score) {
+                break;
+            }*/
+
+            // ─────────────────────────────
+            // SUCCESS EXIT
+            // ─────────────────────────────
+            if (
+                $hallucination < 0.3
+                && $score >= $site->settings->min_similarity_score
+            ) {
+
+                Log::info('✅ Successful response selected', [
+                    'attempt' => $attemptIndex + 1,
+                ]);
+
+                $bestResponse = $response;
+
+                $bestValidation = $validation;
+
+                $bestResults = $results;
+
+                $bestValidatedResponse = $validatedResponse;
+
                 break;
             }
 
         }
         // ─────────────────────────────
-        // 🧠 DECISION FINALE
+        // 🔟 FINAL DECISION
         // ─────────────────────────────
-        if ($validation >= $site->settings->min_similarity_score) {
+        if ($bestScore >= $site->settings->min_similarity_score) {
 
             if ($validatedResponse === "Cette information n’est pas disponible dans nos documents internes.") {
                 // Ajoute un texte introductif pour contextualiser les entities
 
-                if (!empty($this->results->entities)) {
-                    $fallbackMessage = $this->buildEntitiesFallbackMessage($this->results->entities);
+                if (!empty($bestResults->entities)) {
+                    $fallbackMessage = $this->buildEntitiesFallbackMessage($bestResults->entities);
 
                     if ($fallbackMessage) {
                         $validatedResponse = $fallbackMessage;
                     }
                 }
 
-            } elseif (!empty($this->results->entities)) {
+            } elseif (!empty($bestResults->entities)) {
 
                 $validatedResponse .= "\n\n---\n\n **Ressources utiles :**";
             }
 
             return new ChatResponse(
                 message: $validatedResponse,
-                ctas: $this->results->ctas,
-                entities: $this->results->entities
+                ctas: $bestResults->ctas,
+                entities: $bestResults->entities
             );
         }
 
@@ -278,7 +388,7 @@ class ChatService
                     'Authorization' => 'Bearer ' . env('OPENROUTER_API_KEY'),
                     'Content-Type' => 'application/json', // Bonne pratique
                 ])->post('https://openrouter.ai/api/v1/chat/completions', [
-                    'model' => 'meta-llama/llama-3.1-8b-instruct',
+                    'model' => 'openai/gpt-4.1-mini',
                     'messages' => $messages,
                     'temperature' => floatval($settings->ai_temperature),
                     'max_tokens' => 350//$settings->ai_max_tokens,

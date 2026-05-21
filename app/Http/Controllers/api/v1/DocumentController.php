@@ -19,6 +19,7 @@ class DocumentController extends Controller
      */
     public function store(Request $request, Site $site)
     {
+        //dd($request->all(), $site);
         $request->validate([
             'file' => 'required|file|max:10240|mimes:pdf,doc,docx,xls,xlsx,csv,txt',
             'mapping' => 'nullable|json',
@@ -35,12 +36,8 @@ class DocumentController extends Controller
             // Dispatch indexation
             $site->update(['status' => 'indexing']); // site en cours d'indexation
 
-            // Dispatch indexation (support WooCommerce inclus)
-            if (in_array($document->extension, ['csv', 'xls', 'xlsx'])) {
-                ProductImportJob::dispatch($document, $mapping, $site);
-            } else {
-                IndexDocumentJob::dispatch($document ,$site); // documents standards
-            }
+            // Dispatch indexation
+            IndexDocumentJob::dispatch($document ,$site); // documents standards
 
             return response()->json([
                 'success' => true,

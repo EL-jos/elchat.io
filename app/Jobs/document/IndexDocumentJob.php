@@ -21,8 +21,12 @@ class IndexDocumentJob implements ShouldQueue
 
     public function handle(IndexService $indexService)
     {
+        Log::info("DANS INDEXDOCUMENTJOB", [
+            "site" => $this->site->id,
+            "document" => $this->document->id,
+        ]);
 
-        $indexService->indexDocument($this->document);
+        $indexService->indexDocument($this->site, $this->document);
 
         Log::info("Document indexé: {$this->document->path}");
 

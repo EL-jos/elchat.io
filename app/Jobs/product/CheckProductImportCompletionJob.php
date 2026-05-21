@@ -3,6 +3,7 @@
 namespace App\Jobs\product;
 
 use App\Models\ProductImport;
+use App\Services\MercureService;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Foundation\Queue\Queueable;
@@ -25,7 +26,7 @@ class CheckProductImportCompletionJob implements ShouldQueue
     /**
      * Execute the job.
      */
-    public function handle()
+    public function handle(MercureService $mercureService)
     {
         $import = ProductImport::find($this->importId);
 
@@ -62,5 +63,14 @@ class CheckProductImportCompletionJob implements ShouldQueue
             'import_id' => $import->id,
             'site_id' => $import->site_id,
         ]);
+        $mercureService->post(
+            "site/{$import->site_id}/products/indexing",
+            [
+                'type' => 'indexing_progress',
+                'progress' => 100,
+                'message' => 'Import terminé ✅',
+                'done' => true
+            ]
+        );
     }
 }

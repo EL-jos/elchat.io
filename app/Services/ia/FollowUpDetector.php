@@ -2,85 +2,170 @@
 
 namespace App\Services\ia;
 
-/*class FollowUpDetector
-{
-    public function isFollowUp(string $question): bool
-    {
-        $short = str_word_count($question) <= 7;
-
-        $containsPronoun = preg_match(
-            '/\b(il|elle|ils|elles|ce|cela|ça|celui|celle|ceux|celles|le|la|les|lui)\b/i',
-            $question
-        );
-
-        $startsWithConnector = preg_match(
-            '/^(et|ou|mais|donc|alors|aussi)/i',
-            trim($question)
-        );
-
-        return $short || $containsPronoun || $startsWithConnector;
-    }
-}*/
-
 use App\Models\Conversation;
 use App\Models\Message;
 use Illuminate\Support\Facades\Http;
 
 class FollowUpDetector
 {
+    private const MAX_RETRIES = 5;
+
     public function isFollowUp(string $question, Conversation $conversation): bool
     {
-        $lastMessages = Message::where('conversation_id', $conversation->id)
-            ->orderBy('created_at', 'desc')
+        $history = $this->buildHistory($conversation);
+
+        $baseMessages = [
+            [
+                'role' => 'system',
+                'content' => $this->systemPrompt(),
+            ],
+            [
+                'role' => 'user',
+                'content' => $this->userPrompt($history, $question),
+            ]
+        ];
+
+        $temperature = 0;
+
+        for ($attempt = 1; $attempt <= self::MAX_RETRIES; $attempt++) {
+
+            try {
+
+                $response = Http::timeout(15)
+                    ->retry(2, 300, throw: false)
+                    ->withHeaders([
+                        'Authorization' => 'Bearer ' . env('OPENROUTER_API_KEY'),
+                    ])
+                    ->post(
+                        'https://openrouter.ai/api/v1/chat/completions',
+                        [
+                            'model' => 'openai/gpt-4.1-mini',
+                            'messages' => $baseMessages,
+                            'temperature' => $temperature,
+                            'max_tokens' => 16,
+                        ]
+                    );
+
+                if (!$response->successful()) {
+
+                    logger()->warning('FollowUpDetector HTTP failure', [
+                        'attempt' => $attempt,
+                        'status' => $response->status(),
+                        'body' => $response->body(),
+                    ]);
+
+                    continue;
+                }
+
+                $content = $response->json()['choices'][0]['message']['content'] ?? '';
+
+                $normalized = $this->normalizeAnswer($content);
+
+                if ($normalized !== null) {
+
+                    logger()->info('FollowUpDetector success', [
+                        'attempt' => $attempt,
+                        'answer' => $normalized,
+                    ]);
+
+                    return $normalized;
+                }
+
+                logger()->warning('FollowUpDetector invalid response', [
+                    'attempt' => $attempt,
+                    'raw_response' => $content,
+                ]);
+
+                // Retry prompt reinforcement
+                $baseMessages[] = [
+                    'role' => 'system',
+                    'content' => 'INVALID RESPONSE FORMAT. Reply ONLY with YES or NO.',
+                ];
+
+                // Lower randomness progressively
+                $temperature = max(0, $temperature - 0.1);
+
+            } catch (\Throwable $e) {
+
+                logger()->error('FollowUpDetector exception', [
+                    'attempt' => $attempt,
+                    'message' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        // Safe fallback
+        return false;
+    }
+
+    private function normalizeAnswer(string $answer): ?bool
+    {
+        $answer = strtoupper(trim($answer));
+
+        // strict cleanup
+        $answer = preg_replace('/[^A-Z]/', '', $answer);
+
+        return match ($answer) {
+            'YES' => true,
+            'NO' => false,
+            default => null,
+        };
+    }
+
+    private function buildHistory(Conversation $conversation): string
+    {
+        return Message::where('conversation_id', $conversation->id)
+            ->latest()
             ->take(4)
             ->get()
             ->reverse()
             ->map(fn($m) => $m->content)
             ->implode("\n");
+    }
 
-        $systemPrompt = "
-        Tu es un classificateur.
-        Ta mission est de déterminer si une question dépend
-        du contexte précédent.
+    private function systemPrompt(): string
+    {
+        return <<<PROMPT
+You are a strict binary classifier.
 
-        Réponds uniquement par :
-        YES ou NO
-        ";
+Your task:
+Determine whether the new user question depends on previous conversation context.
 
-        $userPrompt = "
-        Historique :
-        {$lastMessages}
+Rules:
+- Reply ONLY with YES or NO
+- No explanations
+- No punctuation
+- No extra words
+- No markdown
 
-        Nouvelle question :
-        {$question}
+Examples:
 
-        Dépend du contexte ?
-        ";
+Context:
+User: Who is Elon Musk?
+User: Where was he born?
 
-        try {
-            $response = Http::timeout(10)
-                ->retry(2, 300)
-                ->withHeaders([
-                    'Authorization' => 'Bearer ' . env('OPENROUTER_API_KEY'),
-                ])
-                ->post('https://openrouter.ai/api/v1/chat/completions', [
-                    'model' => 'meta-llama/llama-3.1-8b-instruct',
-                    'messages' => [
-                        ['role' => 'system', 'content' => $systemPrompt],
-                        ['role' => 'user', 'content' => $userPrompt],
-                    ],
-                    'temperature' => 0,
-                    'max_tokens' => 5,
-                ]);
+Answer:
+YES
 
-            $answer = strtoupper(trim(
-                $response->json()['choices'][0]['message']['content'] ?? 'NO'
-            ));
+Context:
+User: What is Laravel?
+User: Explain quantum physics.
 
-            return $answer === 'YES';
+Answer:
+NO
+PROMPT;
+    }
 
-        } catch (\Throwable $e) {
-            return false; // fallback safe
-        }
+    private function userPrompt(string $history, string $question): string
+    {
+        return <<<PROMPT
+Conversation history:
+{$history}
+
+New question:
+{$question}
+
+Does the new question depend on previous context?
+PROMPT;
     }
 }

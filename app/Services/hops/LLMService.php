@@ -10,7 +10,7 @@ use Throwable;
 class LLMService
 {
     protected string $primaryModel = 'openai/gpt-4o-mini';
-    protected string $fallbackModel = 'openai/gpt-3.5-turbo';
+    protected string $fallbackModel = 'anthropic/claude-3.5-haiku';
     protected int $maxRetries = 3;
     protected int $timeout = 15;
 

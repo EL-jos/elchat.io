@@ -9,6 +9,7 @@ use App\Models\Site;
 use App\Services\CrawlService;
 use App\Services\IndexService;
 use App\Services\lexical\LexicalIndexService;
+use App\Services\MercureService;
 use App\Services\vector\VectorIndexService;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -35,23 +36,54 @@ class CrawlPageBatchJob implements ShouldQueue
         $this->urls = $urls;
     }
 
-    public function handle(CrawlService $crawlService, IndexService $indexService, VectorIndexService $vectorIndexService, LexicalIndexService $lexicalIndexService)
+    public function handle(
+        CrawlService $crawlService,
+        IndexService $indexService,
+        VectorIndexService $vectorIndexService,
+        LexicalIndexService $lexicalIndexService,
+        MercureService $mercureService,
+    )
     {
         $site = Site::findOrFail($this->siteId);
 
         foreach ($this->urls as $url) {
             $crawlJob = CrawlJob::where('site_id', $site->id)
                 ->where('page_url', $url)
+                ->where('status', 'pending')
                 ->first();
 
             if (!$crawlJob) continue;
 
-            if ($crawlService->isExcluded($crawlJob->page_url, $site)) {
-                $crawlJob->update(['status' => 'done']);
+            $updated = CrawlJob::where('id', $crawlJob->id)
+                ->where('status', 'pending')
+                ->update([
+                    'status' => 'processing'
+                ]);
+
+            if ($updated === 0) {
                 continue;
             }
 
-            $crawlJob->update(['status' => 'processing']);
+            if ($crawlService->isExcluded($crawlJob->page_url, $site)) {
+                $crawlJob->update(['status' => 'done']);
+                $mercureService->post(
+                    "site/{$site->id}/knowledge/indexing",
+                    [
+                        'type' => 'indexing_warning',
+                        'progress' => null,
+                        'message' => "Page exclue : {$url}",
+                        'done' => false
+                    ]
+                );
+
+                $this->sendProgress(
+                    $site,
+                    $mercureService
+                );
+                continue;
+            }
+
+            //$crawlJob->update(['status' => 'processing']);
 
             try {
                 // 🔥 RECRAWL SAFE — suppression ancienne page + chunks
@@ -75,12 +107,13 @@ class CrawlPageBatchJob implements ShouldQueue
                 }
 
                 $page = $crawlService->crawlSinglePage($site, $url, 0, $crawlJob->id);
-                Log::warning("AGE CREEE", [
-                    'age' => $page->id,
-                    'title' => $page->title
-                ]);
 
                 if ($page) {
+                    Log::warning("AGE CREEE", [
+                        'age' => $page->id,
+                        'title' => $page->title
+                    ]);
+
                     Log::warning("DEBUT DE L'INDEXATION DE LA AGE CREEE", [
                         'age' => $page->id,
                         'title' => $page->title
@@ -97,26 +130,113 @@ class CrawlPageBatchJob implements ShouldQueue
                 }
 
                 $crawlJob->update(['status' => 'done']);
+                $this->sendProgress(
+                    $site,
+                    $mercureService,
+                    "Page indexée : {$url}"
+                );
             } catch (\Throwable $e) {
                 $crawlJob->update([
                     'status' => 'error',
                     'error_message' => $e->getMessage(),
                 ]);
                 Log::error("Erreur crawl page {$url}", ['site_id' => $site->id, 'error' => $e->getMessage()]);
+                $mercureService->post(
+                    "site/{$site->id}/knowledge/indexing",
+                    [
+                        'type' => 'indexing_error',
+                        'progress' => null,
+                        'message' => "Erreur sur {$url} : {$e->getMessage()}",
+                        'done' => false
+                    ]
+                );
+
+                $this->sendProgress(
+                    $site,
+                    $mercureService
+                );
             }
         }
 
         // Vérifier si le site est terminé
-        CheckCrawlCompletionJob::dispatch($site->id);
+        //CheckCrawlCompletionJob::dispatch($site->id);
 
         Log::info("Batch dispatché pour site {$this->siteId}, pages: " . count($this->urls));
     }
-
     public function failed(Throwable $e)
     {
         Log::error("CrawlPageBatchJob échoué pour site {$this->siteId}", [
             'error' => $e->getMessage(),
             'urls' => $this->urls,
         ]);
+        CrawlJob::where('site_id', $this->siteId)
+            ->whereIn('page_url', $this->urls)
+            ->where('status', 'processing')
+            ->update([
+                'status' => 'error',
+                'error_message' => 'Batch failed'
+            ]);
+    }
+    private function sendProgress(
+        Site $site,
+        MercureService $mercureService,
+        string $message = null
+    ) {
+
+        if ($site->status === 'ready') {
+            return;
+        }
+
+        $total = CrawlJob::where('site_id', $site->id)->count();
+
+        $done = CrawlJob::where('site_id', $site->id)
+            ->whereIn('status', ['done', 'error'])
+            ->count();
+
+        $progress = $total > 0
+            ? intval(($done / $total) * 100)
+            : 0;
+
+        $isFinished = $done >= $total;
+
+        // IMPORTANT :
+        // done=true UNIQUEMENT la première fois
+        $shouldSendDoneEvent = false;
+
+        $site->refresh();
+        if ($isFinished) {
+
+            $updated = Site::where('id', $site->id)
+                ->where('status', '!=', 'ready')
+                ->update([
+                    'status' => 'ready'
+                ]);
+
+            $shouldSendDoneEvent = $updated > 0;
+        }
+
+        // Si déjà terminé, ne plus envoyer d'event final
+        if ($isFinished && !$shouldSendDoneEvent && $progress >= 100) {
+            return;
+        }
+
+        $mercureService->post(
+            "site/{$site->id}/knowledge/indexing",
+            [
+                'type' => $isFinished
+                    ? 'indexing_info'
+                    : 'indexing_progress',
+
+                'progress' => $progress,
+
+                'message' => $message ?? (
+                    $isFinished
+                        ? 'Crawl terminé'
+                        : "Indexation {$done}/{$total}"
+                    ),
+
+                'done' => $shouldSendDoneEvent
+            ]
+        );
     }
 }

@@ -6,6 +6,7 @@ use App\Models\Document;
 use App\Models\Product;
 use App\Models\ProductImport;
 use App\Services\IndexService;
+use App\Services\MercureService;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Foundation\Queue\Queueable;
@@ -26,11 +27,17 @@ class IndexProductBatchJob implements ShouldQueue
         public string $siteId
     ) {}
 
-    public function handle(IndexService $indexService)
+    public function handle(IndexService $indexService, MercureService $mercureService)
     {
         Log::info("📦 Batch import produits démarré ({$this->importId})");
 
         $siteId = $this->siteId;
+        $import = ProductImport::find($this->importId);
+
+        if (!$import) {
+            Log::error("❌ Import introuvable ({$this->importId})");
+            return;
+        }
 
         foreach ($this->products as $index => $data) {
 
@@ -77,23 +84,58 @@ class IndexProductBatchJob implements ShouldQueue
                 |
                 */
 
-                if ($product->wasRecentlyCreated || $product->wasChanged()) {
+                //if ($product->wasRecentlyCreated || $product->wasChanged()) {
                     $indexService->indexStandardProduct($product, $this->document, $index);
-                }
+                //}
+                // 🔹 4. Progress tracking (ATOMIQUE)
+                ProductImport::where('id', $this->importId)
+                    ->increment('processed_products');
+
+                // 🔹 5. Progress realtime
+                $processed = ProductImport::where('id', $this->importId)
+                    ->value('processed_products');
+
+                /*$progress = $import->total_products > 0
+                    ? round(($processed / $import->total_products) * 100)
+                    : 0;*/
+
+                $progress = 10 + round(($processed / $import->total_products) * 90);
+
+                $mercureService->post(
+                    "site/{$this->siteId}/products/indexing",
+                    [
+                        'type' => 'indexing_progress',
+                        'progress' => $progress,
+                        'processed' => $processed,
+                        'total' => $import->total_products,
+                        'message' => "Traitement des produits ({$processed}/{$import->total_products})",
+                        'done' => false
+                    ]
+                );
 
             } catch (\Throwable $e) {
                 Log::error("❌ Erreur produit", [
                     'error' => $e->getMessage(),
                     'data' => $data
                 ]);
+                $mercureService->post(
+                    "site/{$this->siteId}/products/indexing",
+                    [
+                        'type' => 'indexing_warning', // 🔥 change
+                        'message' => "Produit ignoré: " . $e->getMessage(),
+                        'done' => false
+                    ]
+                );
             }
+
         }
 
-        // 🔹 4. Progress tracking
+        /*// 🔹 4. Progress tracking
         ProductImport::where('id', $this->importId)
-            ->increment('processed_products', count($this->products));
+            ->increment('processed_products', count($this->products));*/
 
         Log::info("✅ Batch terminé ({$this->importId})");
+
     }
 
     /*

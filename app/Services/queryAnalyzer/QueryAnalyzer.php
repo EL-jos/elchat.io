@@ -12,41 +12,159 @@ class QueryAnalyzer
     public function __construct(
 
     ) {}
-
     public function analyze(string $question, Conversation $conversation): QueryPlan
     {
         $prompt = $this->buildPrompt($question, $conversation);
 
-        $response = $this->callLLMForQueryPlan($prompt, $question);
+        $maxValidationRetries = 5;
 
-        //$data = json_decode($response, true);
+        $attempt = 0;
 
-        $data = $this->extractJson($response);
+        $lastResponse = null;
 
-        if (!is_array($data)) {
+        while ($attempt < $maxValidationRetries) {
 
-            Log::warning("QueryAnalyzer JSON invalid", [
-                "response" => $response
+            $attempt++;
+
+            Log::info('QueryAnalyzer validation pipeline started', [
+                'attempt' => $attempt,
+                'question' => substr($question, 0, 120)
             ]);
 
-            $data = [
-                "clean_query" => $question,
-                "search_queries" => [$question],
-                "sub_queries" => [],
-                "entities" => [],
-                "intent" => "information",
-                "query_type" => "factual",
-                "needs_conversation_context" => false,
-                "filters" => [],
-                "top_k" => 30,
-                "search_strategy" => "single",
-                "constraints" => []
-            ];
+            /*
+            |--------------------------------------------------------------------------
+            | Build prompt
+            |--------------------------------------------------------------------------
+            */
+
+            $effectivePrompt = $attempt === 1
+                ? $prompt
+                : $this->buildRepairPrompt(
+                    $prompt,
+                    $lastResponse ?? ''
+                );
+
+            /*
+            |--------------------------------------------------------------------------
+            | LLM call
+            |--------------------------------------------------------------------------
+            */
+
+            $response = $this->callLLMForQueryPlan(
+                $effectivePrompt,
+                $question
+            );
+
+            $lastResponse = $response;
+
+            /*
+            |--------------------------------------------------------------------------
+            | Extract JSON
+            |--------------------------------------------------------------------------
+            */
+
+            $data = $this->extractJson($response);
+
+            if (!$data) {
+
+                Log::warning('QueryAnalyzer invalid JSON', [
+                    'attempt' => $attempt,
+                    'response' => substr($response, 0, 1000)
+                ]);
+
+                continue;
+            }
+
+            /*
+            |--------------------------------------------------------------------------
+            | Normalize response
+            |--------------------------------------------------------------------------
+            */
+
+            $data = $this->normalizeResponse($data);
+
+            /*
+            |--------------------------------------------------------------------------
+            | Structure validation
+            |--------------------------------------------------------------------------
+            */
+
+            if (!$this->validateResponseStructure($data)) {
+
+                Log::warning('QueryAnalyzer structure validation failed', [
+                    'attempt' => $attempt,
+                    'data' => $data
+                ]);
+
+                continue;
+            }
+
+            /*
+            |--------------------------------------------------------------------------
+            | Enum validation
+            |--------------------------------------------------------------------------
+            */
+
+            if (!$this->validateEnums($data)) {
+
+                Log::warning('QueryAnalyzer enum validation failed', [
+                    'attempt' => $attempt,
+                    'intent' => $data['intent'] ?? null,
+                    'query_type' => $data['query_type'] ?? null,
+                    'strategy' => $data['search_strategy'] ?? null
+                ]);
+
+                continue;
+            }
+
+            /*
+            |--------------------------------------------------------------------------
+            | Business rules validation
+            |--------------------------------------------------------------------------
+            */
+
+            if (!$this->validateBusinessRules($data)) {
+
+                Log::warning('QueryAnalyzer business validation failed', [
+                    'attempt' => $attempt,
+                    'data' => $data
+                ]);
+
+                continue;
+            }
+
+            /*
+            |--------------------------------------------------------------------------
+            | Success
+            |--------------------------------------------------------------------------
+            */
+
+            Log::info('QueryAnalyzer success', [
+                'attempt' => $attempt,
+                'intent' => $data['intent'],
+                'strategy' => $data['search_strategy'],
+                'query_count' => count($data['search_queries']),
+                'sub_query_count' => count($data['sub_queries'])
+            ]);
+
+            return $this->mapToQueryPlan($data);
         }
 
-        return $this->mapToQueryPlan($data);
-    }
+        /*
+        |--------------------------------------------------------------------------
+        | TOTAL FAILURE FALLBACK
+        |--------------------------------------------------------------------------
+        */
 
+        Log::error('QueryAnalyzer completely failed after retries', [
+            'question' => $question,
+            'attempts' => $maxValidationRetries
+        ]);
+
+        return $this->mapToQueryPlan(
+            $this->buildFallbackPlan($question)
+        );
+    }
     private function buildPrompt(string $question, Conversation $conversation): string
     {
         $summary = $conversation->summary ?? "";
@@ -248,7 +366,6 @@ class QueryAnalyzer
         - avoid filters unless certain
         PROMPT;
     }
-
     private function mapToQueryPlan(array $data): QueryPlan
     {
         $plan = new QueryPlan();
@@ -287,7 +404,6 @@ class QueryAnalyzer
 
         return $plan;
     }
-
     private function callLLMForQueryPlan(string $prompt, string $question): string
     {
         $maxRetries = 4;
@@ -306,7 +422,7 @@ class QueryAnalyzer
                     'Content-Type' => 'application/json',
                 ])->post('https://openrouter.ai/api/v1/chat/completions', [
 
-                    "model" => "meta-llama/llama-3.1-8b-instruct",
+                    "model" => "openai/gpt-4.1-mini",
 
                     "messages" => [
                         [
@@ -385,21 +501,234 @@ class QueryAnalyzer
             "constraints" => []
         ]);
     }
-
     private function extractJson(string $response): ?array
     {
-        // Cherche la première accolade ouvrante et la dernière fermante
-        $start = strpos($response, '{');
-        $end = strrpos($response, '}');
+        $response = trim($response);
 
-        if ($start === false || $end === false) {
+        // remove markdown fences
+        $response = preg_replace('/```json|```/', '', $response);
+
+        preg_match('/\{(?:[^{}]|(?R))*\}/s', $response, $matches);
+
+        if (empty($matches[0])) {
             return null;
         }
 
-        $json = substr($response, $start, $end - $start + 1);
+        $decoded = json_decode($matches[0], true);
 
-        $data = json_decode($json, true);
+        if (json_last_error() !== JSON_ERROR_NONE) {
 
-        return is_array($data) ? $data : null;
+            Log::warning("JSON decode failed", [
+                'error' => json_last_error_msg()
+            ]);
+
+            return null;
+        }
+
+        return $decoded;
+    }
+    private function validateResponseStructure(?array $data): bool
+    {
+        if (!$data) {
+            return false;
+        }
+
+        $requiredFields = [
+            'clean_query',
+            'search_queries',
+            'sub_queries',
+            'entities',
+            'intent',
+            'query_type',
+            'needs_conversation_context',
+            'filters',
+            'top_k',
+            'search_strategy',
+            'constraints'
+        ];
+
+        foreach ($requiredFields as $field) {
+            if (!array_key_exists($field, $data)) {
+
+                Log::warning("Missing field in QueryAnalyzer response", [
+                    'field' => $field
+                ]);
+
+                return false;
+            }
+        }
+
+        if (!is_string($data['clean_query'])) {
+            return false;
+        }
+
+        if (!is_array($data['search_queries'])) {
+            return false;
+        }
+
+        if (!is_array($data['sub_queries'])) {
+            return false;
+        }
+
+        if (!is_array($data['entities'])) {
+            return false;
+        }
+
+        if (!is_array($data['filters'])) {
+            return false;
+        }
+
+        if (!is_array($data['constraints'])) {
+            return false;
+        }
+
+        if (!is_bool($data['needs_conversation_context'])) {
+            return false;
+        }
+
+        if (!is_int($data['top_k'])) {
+            return false;
+        }
+
+        return true;
+    }
+    private function validateEnums(array $data): bool
+    {
+        $validIntents = [
+            'information',
+            'pricing',
+            'comparison',
+            'navigation',
+            'transactional',
+            'support',
+            'lead',
+            'booking',
+            'download'
+        ];
+
+        $validQueryTypes = [
+            'factual',
+            'exploratory',
+            'transactional'
+        ];
+
+        $validStrategies = [
+            'single',
+            'multi_query',
+            'decomposition'
+        ];
+
+        if (!in_array($data['intent'], $validIntents)) {
+            return false;
+        }
+
+        if (!in_array($data['query_type'], $validQueryTypes)) {
+            return false;
+        }
+
+        if (!in_array($data['search_strategy'], $validStrategies)) {
+            return false;
+        }
+
+        return true;
+    }
+    private function validateBusinessRules(array $data): bool
+    {
+        // comparison => decomposition obligatoire
+        if (
+            $data['intent'] === 'comparison'
+            && $data['search_strategy'] !== 'decomposition'
+        ) {
+            return false;
+        }
+
+        // comparison => subqueries obligatoires
+        if (
+            $data['intent'] === 'comparison'
+            && empty($data['sub_queries'])
+        ) {
+            return false;
+        }
+
+        // max limits
+        if (count($data['search_queries']) > 5) {
+            return false;
+        }
+
+        if (count($data['sub_queries']) > 5) {
+            return false;
+        }
+
+        // top_k guard
+        if ($data['top_k'] < 1 || $data['top_k'] > 50) {
+            return false;
+        }
+
+        return true;
+    }
+    private function buildRepairPrompt( string $originalPrompt, string $invalidResponse ): string {
+
+        return $originalPrompt . "
+
+CRITICAL ERROR:
+Your previous response was INVALID.
+
+Previous invalid response:
+{$invalidResponse}
+
+You MUST now:
+- Return STRICT VALID JSON
+- Respect ALL required fields
+- Respect ALL enum values
+- Do NOT add markdown
+- Do NOT add explanations
+- Do NOT omit fields
+";
+    }
+    private function normalizeResponse(array $data): array
+    {
+        $data['intent'] = strtolower(trim($data['intent']));
+        $data['query_type'] = strtolower(trim($data['query_type']));
+        $data['search_strategy'] = strtolower(trim($data['search_strategy']));
+
+        $data['top_k'] = max(
+            1,
+            min(50, intval($data['top_k']))
+        );
+
+        $data['search_queries'] = array_values(
+            array_unique($data['search_queries'])
+        );
+
+        return $data;
+    }
+    private function buildFallbackPlan(string $question): array
+    {
+        return [
+
+            "clean_query" => $question,
+
+            "search_queries" => [
+                $question
+            ],
+
+            "sub_queries" => [],
+
+            "entities" => [],
+
+            "intent" => "information",
+
+            "query_type" => "factual",
+
+            "needs_conversation_context" => false,
+
+            "filters" => [],
+
+            "top_k" => 20,
+
+            "search_strategy" => "single",
+
+            "constraints" => []
+        ];
     }
 }

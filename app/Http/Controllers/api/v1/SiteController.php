@@ -14,6 +14,7 @@ use App\Models\WidgetSetting;
 use App\Services\CrawlService;
 use App\Services\IndexService;
 use App\Services\lexical\LexicalIndexService;
+use App\Services\MercureService;
 use App\Services\vector\VectorCreationService;
 use App\Services\vector\VectorIndexService;
 use Illuminate\Http\JsonResponse;
@@ -176,7 +177,7 @@ class SiteController extends Controller
     /**
      * Trigger Crawl + Index pour un site
      */
-    public function crawl($id)
+    public function crawl($id, MercureService $mercureService)
     {
         $site = Site::where('id', $id)
             ->where('account_id', auth()->user()->ownedAccount->id)
@@ -187,6 +188,16 @@ class SiteController extends Controller
 
         // Mettre directement le status à "crawling" pour l'utilisateur
         $site->update(['status' => 'crawling']);
+
+        $mercureService->post(
+            "site/{$site->id}/knowledge/indexing",
+            [
+                'type' => 'indexing_info',
+                'progress' => 0,
+                'message' => 'Préparation du crawl...',
+                'done' => false
+            ]
+        );
 
         return response()->json([
             'message' => 'Crawl started in background',

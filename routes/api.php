@@ -84,10 +84,12 @@ Route::prefix('v1')->group(function () {
             Route::get('users/{userId}/site/{site}', 'show')->whereUuid(['userId', 'site']);
         });
 
-        Route::apiResource('site.ctas', CtaController::class);
         Route::controller(CtaController::class)->group(function () {
-            Route::delete('site/{site}/ctas', 'destroyMultiple');
+            Route::delete('site/{site}/ctas', 'destroyAll');
+            Route::delete('site/{site}/ctas/bulk', 'destroyMultiple');
+            Route::post('site/{site}/cta/forms/submit', 'submitForm');
         });
+        Route::apiResource('site.ctas', CtaController::class);
 
     });
     Route::controller(SiteController::class)->group(function () {
@@ -103,6 +105,9 @@ Route::prefix('v1')->group(function () {
             // Récupérer les messages d’une conversation d’un visitor
             Route::get('chat/{conversationId}/{siteId}', 'visitorMessages');
             Route::get('/config/{siteId}', 'widgetConfig');
+        });
+        Route::controller(CtaController::class)->group(function () {
+            Route::post('site/{site}/cta/forms/submit', 'submitForm');
         });
     });
 });

@@ -274,19 +274,19 @@ class SingleHopPipelineService
             );
         }
 
-        $entities = $this->entityRelevanceService->filterRelevant(
+        /*$entities = $this->entityRelevanceService->filterRelevant(
             $entities,
             $query,
             $queryPlan->entities ?? []
-        );
+        );*/
         $ctas = $this->CTAEngine->resolve($site, $queryPlan, $conversation);
         //Log::info("Resolved CTAs:", ['ctas' => $ctas]);
-        $ctas = $this->ctaRelevanceService->filterRelevant(
+        /*$ctas = $this->ctaRelevanceService->filterRelevant(
             $ctas,
             $queryPlan,
             $query,
             $entities
-        );
+        );*/
 
         // ─────────────────────────────
         // 8️⃣ Construction Prompt

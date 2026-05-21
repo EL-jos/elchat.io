@@ -5,6 +5,7 @@ namespace App\Jobs\product;
 use App\Models\Document;
 use App\Models\Product;
 use App\Models\Site;
+use App\Services\MercureService;
 use App\Services\product\ProductReindexService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -27,11 +28,17 @@ class ReindexProductJob implements ShouldQueue
         public array $productData
     ) {}
 
-    public function handle(ProductReindexService $productReindexService): void
+    public function handle(ProductReindexService $productReindexService, MercureService $mercureService): void
     {
         Log::info('[JOB REINDEX] Start', [
             'site_id' => $this->siteId,
             'product_id' => $this->productId,
+        ]);
+        $mercureService->post("site/{$this->siteId}/products/indexing", [
+            'type' => 'indexing_progress',
+            'progress' => 0,
+            'message' => 'Récupération du produit ...',
+            'done' => false
         ]);
 
         $product = Product::findOrFail($this->productId);
@@ -40,6 +47,12 @@ class ReindexProductJob implements ShouldQueue
             throw new \Exception("Product not found");
         }
 
+        $mercureService->post("site/{$this->siteId}/products/indexing", [
+            'type' => 'indexing_progress',
+            'progress' => 5,
+            'message' => 'Normalisation du produit ...',
+            'done' => false
+        ]);
         $productUpdating = $this->normalize(product: $product, data: $this->productData);
 
         $productReindexService->reindexProduct(

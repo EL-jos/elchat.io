@@ -7,6 +7,7 @@ use App\Mappers\ProductMapper;
 use App\Models\Document;
 use App\Models\ProductImport;
 use App\Models\Site;
+use App\Services\MercureService;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Foundation\Queue\Queueable;
@@ -26,13 +27,19 @@ class ProductImportJob implements ShouldQueue
         public Site $site
     ) {}
 
-    public function handle()
+    public function handle(MercureService $mercureService)
     {
         Log::info("🚀 ProductImportJob démarré pour site {$this->site->id}");
 
         $this->site->update(['status' => 'indexing']);
 
         try {
+            $mercureService->post("site/{$this->site->id}/products/indexing", [
+                'type' => 'indexing_progress',
+                'progress' => 0,
+                'message' => 'Lecture du fichier...',
+                'done' => false
+            ]);
             // 🔹 1. Parse fichier
             $rows = ProductFileParser::parse($this->document);
 
@@ -41,6 +48,12 @@ class ProductImportJob implements ShouldQueue
                 $this->site->update(['status' => 'ready']);
                 return;
             }
+            $mercureService->post("site/{$this->site->id}/products/indexing", [
+                'type' => 'indexing_progress',
+                'progress' => 5,
+                'message' => 'Fichier analysé, mapping en cours...',
+                'done' => false
+            ]);
 
             // 🔹 2. Mapping
             $products = ProductMapper::map($rows, $this->mapping);
@@ -50,6 +63,12 @@ class ProductImportJob implements ShouldQueue
                 $this->site->update(['status' => 'ready']);
                 return;
             }
+            $mercureService->post("site/{$this->site->id}/products/indexing", [
+                'type' => 'indexing_progress',
+                'progress' => 10,
+                'message' => 'Produits prêts à être importés...',
+                'done' => false
+            ]);
 
             // 🔹 3. Empêcher double import
             $existing = ProductImport::where('document_id', $this->document->id)
@@ -83,6 +102,12 @@ class ProductImportJob implements ShouldQueue
                         $import->site->id,
                     );
                 });
+            $mercureService->post("site/{$this->site->id}/products/indexing", [
+                'type' => 'indexing_progress',
+                'progress' => 10,
+                'message' => 'Import en cours...',
+                'done' => false
+            ]);
 
             // 🔹 6. Check async completion
             CheckProductImportCompletionJob::dispatch($import->id)
@@ -94,6 +119,15 @@ class ProductImportJob implements ShouldQueue
             $this->site->update(['status' => 'error']);
 
             Log::error("❌ ProductImportJob échoué: {$e->getMessage()}");
+
+            $mercureService->post(
+                "site/{$this->site->id}/products/indexing",
+                [
+                    'type' => 'indexing_error',
+                    'message' => $e->getMessage(),
+                    'done' => true
+                ]
+            );
 
             throw $e;
         }

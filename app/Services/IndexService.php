@@ -6,6 +6,7 @@ use App\Models\Document;
 use App\Models\FieldSynonym;
 use App\Models\Page;
 use App\Models\Product;
+use App\Models\Site;
 use App\Services\ia\EmbeddingService;
 use App\Services\lexical\LexicalIndexService;
 use App\Services\vector\VectorIndexService;
@@ -22,6 +23,9 @@ class IndexService
         protected EmbeddingService $embeddingService,
         protected VectorIndexService $vectorIndexService,
         protected LexicalIndexService  $lexicalIndexService,
+        protected DocumentCanonicalService $documentCanonicalService,
+        protected DocumentChunkingService $documentChunkingService,
+        protected MercureService $mercureService,
     ) {}
     public function indexPage(Page $page, array $context = []): void
     {
@@ -651,6 +655,7 @@ class IndexService
         $hash = hash('sha256', $text . ($page->id ?? ''));
 
         return Chunk::where('site_id', $page->site_id)
+            ->where('page_id', $page->id)
             ->where('hash', $hash)
             ->exists();
     }
@@ -677,114 +682,224 @@ class IndexService
     /**
      * Indexe un document (PDF, Word, TXT)
      */
-    public function indexDocument(Document $document, array $context = []): void
+    public function indexDocument(Site $site, Document $document, array $context = []): void
     {
-        $siteId = $document->documentable->site->id ?? null;
+        $siteId = $document->documentable_id ?? null;
 
-        // 1️⃣ Extraction du texte
-        $text = $this->extractTextFromDocument($document->path, $document->extension);
+        Log::info("DANS INDEX DOCUMENT", [
+            "site_id" => $siteId,
+            "context" => $context,
+            "document" => $document,
+        ]);
 
-        /*if (mb_strlen($text) < 50) {
-            Log::info("Document trop court, ignoré: {$document->path}");
+        $this->publishProgress(
+            $siteId,
+            "Analyse du document…",
+            5
+        );
+
+        // 1️⃣ Canonical + Chunking (PURE CPU, PAS DB)
+        $path = public_path($document->path);
+        Log::info("PATH OF FILE", [
+            "path" => $path
+        ]);
+        $canonical = $this->documentCanonicalService->buildCanonicalDocument(
+            path: $path,
+            extension: $document->extension,
+            fullPath: $path
+        );
+
+        Log::info("CANONICAL", $canonical);
+
+        $this->publishProgress(
+            $siteId,
+            "Construction des chunks intelligents…",
+            15
+        );
+
+
+        $chunks = $this->documentChunkingService->chunk($canonical);
+
+        $totalChunks = count($chunks);
+
+        if ($totalChunks === 0) {
+
+            $this->publishProgress(
+                $siteId,
+                "Aucun contenu indexable trouvé",
+                100,
+                true,
+                'indexing_warning'
+            );
+
             return;
-        }*/
+        }
 
+        $this->publishProgress(
+            $siteId,
+            "Préparation des index de recherche…",
+            20
+        );
+
+        $this->lexicalIndexService->ensureIndex($siteId);
+
+        $indexedChunks = [];
+        $processed = 0;
+
+        // 2️⃣ Embeddings AVANT DB transaction
+        foreach ($chunks as $chunkData) {
+
+            $processed++;
+
+            $this->publishProgress(
+                $siteId,
+                "Analyse sémantique des chunks ({$processed}/{$totalChunks})…",
+                min(70, 20 + intval(($processed / max($totalChunks, 1)) * 50)),
+                false,
+                'indexing_progress',
+            );
+
+            $textChunk = trim($chunkData['text'] ?? '');
+
+            if ($textChunk === '') {
+                continue;
+            }
+
+            try {
+                $embedding = !($chunkData['no_embedding'] ?? false)
+                    ? $this->embeddingService->getEmbedding($textChunk)
+                    : null;
+            } catch (\Throwable $e) {
+                Log::warning("Embedding failed", [
+                    'document_id' => $document->id,
+                    'preview' => mb_substr($textChunk, 0, 100),
+                    'error' => $e->getMessage(),
+                ]);
+
+                $this->publishProgress(
+                    $siteId,
+                    "Erreur embedding sur un chunk",
+                    min(95, 20 + intval(($processed / max($totalChunks, 1)) * 70)),
+                    false,
+                    'indexing_warning'
+                );
+
+                continue;
+            }
+
+            $indexedChunks[] = [
+                'text' => $textChunk,
+                'priority' => $chunkData['priority'],
+                'metadata' => $chunkData['metadata'],
+                'embedding' => $embedding,
+                'hash' => hash('sha256', $textChunk),
+                'lexical_text' => $chunkData['lexical_text'] ?? $this->normalizeForLexicalSearch($textChunk),
+            ];
+        }
+
+        // 3️⃣ DB TRANSACTION ONLY (FAST)
         DB::beginTransaction();
 
         try {
-            // 2️⃣ Construction des chunks intelligents
-            $chunks = $this->chunkBySentencesWithMetadata(
-                $text,
-                $document->name ?? basename($document->path),
-                $document->id,
-                $siteId,
-                800, // max chars
-                120  // overlap
-            );
 
-            $this->lexicalIndexService->ensureIndex($siteId);
+            $stored = 0;
+            $totalIndexed = count($indexedChunks);
 
-            // 3️⃣ Insertion et vectorisation
-            foreach ($chunks as $chunkData) {
-                $textChunk = $chunkData['text'];
-                $priority  = $chunkData['priority'];
-                $metadata  = $chunkData['metadata'];
+            $existingHashes = Chunk::query()
+                ->where('document_id', $document->id)
+                ->pluck('hash')
+                ->flip()
+                ->toArray();
 
-                if ($this->chunkAlreadyExistsForDocument(siteId: $siteId, text: $textChunk)) {
+            foreach ($indexedChunks as $data) {
+
+                $stored++;
+                $this->publishProgress(
+                    $siteId,
+                    "Indexation des chunks ({$stored}/{$totalIndexed})…",
+                    min(95, 70 + intval(($stored / max($totalIndexed, 1)) * 25)),
+                    false,
+                    'indexing_progress',
+                );
+
+                if (isset($existingHashes[$data['hash']])) {
                     continue;
                 }
-
-                try {
-                    if (trim($textChunk) === '') continue;
-                    //$embedding = $this->embeddingService->getEmbedding($textChunk);
-                    if (!($chunkData['no_embedding'] ?? false)) {
-                        $embedding = $this->embeddingService->getEmbedding($textChunk);
-                    } else {
-                        $embedding = null;
-                    }
-                } catch (\Throwable $e) {
-                    Log::warning("Embedding échoué pour document {$document->id}", [
-                        'chunk_preview' => mb_substr($textChunk, 0, 100),
-                        'error' => $e->getMessage(),
-                    ]);
-                    continue; // on skip ce chunk mais pas tout le document
-                }
-
-                $hash = hash('sha256', $textChunk);
 
                 $chunk = Chunk::create([
                     'page_id'     => null,
                     'site_id'     => $siteId,
                     'document_id' => $document->id,
                     'source_type' => 'document',
-                    'text'        => $textChunk,
-                    'priority'    => $priority,
-                    'metadata'    => $metadata,
-                    'hash'        => $hash
+                    'text'        => $data['text'],
+                    'priority'    => $data['priority'],
+                    'metadata'    => $data['metadata'],
+                    'hash'        => $data['hash'],
                 ]);
+                $existingHashes[$data['hash']] = true;
 
                 $this->lexicalIndexService->upsertChunk([
                     'id' => (string) $chunk->id,
-                    'site_id' => $chunk->site_id,
-                    'document_id' => $chunk->document_id,
-                    'source_type' => $chunk->source_type,
-                    'text' => $chunk->text,
-                    'content' => $chunk->text, // 🔥 duplication stratégique
+                    'site_id' => $siteId,
+                    'document_id' => $document->id,
+                    'source_type' => 'document',
+                    'text' => $data['lexical_text'],
+                    'content' => $chunk->text,
                     'priority' => $chunk->priority,
                     'metadata' => $chunk->metadata,
-                ], $chunk->site_id);
+                ], $siteId);
 
-                if ($embedding) {
+                if ($data['embedding']) {
                     $this->vectorIndexService->upsertChunk(
                         siteId: $siteId,
                         chunkId: $chunk->id,
-                        embedding: $embedding,
-                        payload: array_merge([
-                            'site_id'     => $chunk->site_id,
-                            'page_id'     => $chunk->page_id,
-                            'document_id' => $chunk->document_id,
-                            'source_type' => $chunk->source_type,
-                            'priority'    => $chunk->priority,
-                            'metadata'    => $metadata
-                        ]),
-                        collection: "chunks_{$chunk->site_id}"
+                        embedding: $data['embedding'],
+                        payload: [
+                            'site_id' => $siteId,
+                            'document_id' => $document->id,
+                            'source_type' => 'document',
+                            'priority' => $chunk->priority,
+                            'metadata' => $chunk->metadata,
+                        ],
+                        collection: "chunks_{$siteId}"
                     );
                 }
-
             }
 
             DB::commit();
 
-            Log::info("Document indexé: {$document->path}", [
-                'chunks_count' => count($chunks),
-                'document_id'  => $document->id,
+            Log::info("Document indexé", [
+                'document_id' => $document->id,
+                'chunks_count' => count($indexedChunks),
             ]);
+
+            $this->publishProgress(
+                $siteId,
+                "Document indexé avec succès",
+                100,
+                true,
+                'indexing_progress',
+            );
 
         } catch (\Throwable $e) {
             DB::rollBack();
-            Log::error("Indexation document échouée: {$document->path}", [
+
+            Log::error("Indexation échouée", [
+                'document_id' => $document->id,
                 'error' => $e->getMessage(),
             ]);
+
+            $this->publishProgress(
+                $siteId,
+                "Erreur pendant l’indexation",
+                100,
+                true,
+                'indexing_error',
+                [
+                    'error' => $e->getMessage(),
+                ]
+            );
+
             throw $e;
         }
     }
@@ -871,47 +986,96 @@ class IndexService
 
         return $query->exists();
     }
+    protected function resolvePath(string $path): string
+    {
+        return str_starts_with($path, '/')
+            ? $path
+            : base_path('public/' . ltrim($path, '/'));
+    }
     protected function extractTextFromDocument(string $path, string $extension): string
     {
-        $fullPath = public_path($path);
+        $fullPath = $this->resolvePath($path);
+
+        if (!file_exists($fullPath)) {
+            Log::warning("Fichier introuvable: {$fullPath}");
+            return '';
+        }
 
         return match($extension) {
             'pdf' => $this->extractTextFromPDF($fullPath),
             'doc', 'docx' => $this->extractTextFromWord($fullPath),
-            'txt' => file_get_contents($fullPath),
+            'txt' => $this->extractTextFromTXT($fullPath),
+            // 🔥 NEW
+            'xls', 'xlsx' => $this->extractTextFromExcel($fullPath),
+            'csv' => $this->extractTextFromCSV($fullPath),
             default => '',
         };
     }
     protected function extractTextFromPDF(string $fullPath): string
     {
-        if (!file_exists($fullPath)) return '';
-
         try {
             $parser = new \Smalot\PdfParser\Parser();
             $pdf = $parser->parseFile($fullPath);
-            return trim($pdf->getText());
+
+            $text = $pdf->getText();
+
+            $text = $this->normalizePdfText($text);
+
+            return $this->normalizeText($text);
+
         } catch (\Throwable $e) {
-            Log::error("Erreur extraction PDF: {$fullPath}", ['error' => $e->getMessage()]);
+            Log::error("Erreur extraction PDF: {$fullPath}", [
+                'error' => $e->getMessage()
+            ]);
+
             return '';
         }
     }
+    protected function normalizePdfText(string $text): string
+    {
+        // fix broken line breaks
+        $text = preg_replace('/(?<!\n)\n(?!\n)/', ' ', $text);
+
+        // normalize multiple spaces
+        $text = preg_replace('/[ \t]+/', ' ', $text);
+
+        // fix column-like spacing (common in PDFs)
+        $text = preg_replace('/ {2,}/', ' | ', $text);
+
+        return trim($text);
+    }
     protected function extractTextFromWord(string $fullPath): string
     {
-        if (!file_exists($fullPath)) return '';
 
         try {
             $phpWord = \PhpOffice\PhpWord\IOFactory::load($fullPath);
-            $text = '';
+            $textParts = [];
 
             foreach ($phpWord->getSections() as $section) {
                 foreach ($section->getElements() as $element) {
+
+                    // Paragraph text
                     if (method_exists($element, 'getText')) {
-                        $text .= $element->getText() . ' ';
+                        $textParts[] = $element->getText();
                     }
+
+                    // Tables support (important upgrade)
+                    if ($element instanceof \PhpOffice\PhpWord\Element\Table) {
+                        foreach ($element->getRows() as $row) {
+                            foreach ($row->getCells() as $cell) {
+                                foreach ($cell->getElements() as $cellElement) {
+                                    if (method_exists($cellElement, 'getText')) {
+                                        $textParts[] = $cellElement->getText();
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                 }
             }
 
-            return trim($text);
+            return $this->normalizeText(implode("\n", $textParts));
         } catch (\Throwable $e) {
             Log::error("Erreur extraction Word: {$fullPath}", ['error' => $e->getMessage()]);
             return '';
@@ -919,9 +1083,125 @@ class IndexService
     }
     protected function extractTextFromTXT(string $fullPath): string
     {
-        if (!file_exists($fullPath)) return '';
-        return trim(file_get_contents($fullPath));
+        try {
+            $content = file_get_contents($fullPath);
+
+            return $this->normalizeText($content);
+
+        } catch (\Throwable $e) {
+            Log::error("TXT extraction failed", [
+                'file' => $fullPath,
+                'error' => $e->getMessage()
+            ]);
+
+            return '';
+        }
     }
+    protected function extractTextFromExcel(string $fullPath): string
+    {
+        try {
+            $spreadsheet = \PhpOffice\PhpSpreadsheet\IOFactory::load($fullPath);
+
+            $output = [];
+
+            foreach ($spreadsheet->getAllSheets() as $sheet) {
+
+                $sheetName = $sheet->getTitle();
+                $output[] = "=== SHEET: {$sheetName} ===";
+
+                $rows = $sheet->toArray(null, true, true, true);
+
+                if (count($rows) > 5000) {
+                    $rows = array_slice($rows, 0, 5000);
+                }
+
+                if (empty($rows)) continue;
+
+                // headers (first row)
+                $headers = array_shift($rows);
+                if (!is_array($headers)) {
+                    $headers = [];
+                }
+
+                $output[] = implode(' | ', $headers);
+
+                foreach ($rows as $row) {
+
+                    if (count(array_filter($row)) === 0) continue;
+
+                    $cleanRow = [];
+
+                    foreach ($headers as $col => $headerName) {
+                        $cleanRow[] = $row[$col] ?? '';
+                    }
+
+                    $output[] = implode(' | ', $cleanRow);
+                }
+            }
+
+            return $this->normalizeText(implode("\n", $output));
+
+        } catch (\Throwable $e) {
+            Log::error("Excel extraction failed", [
+                'file' => $fullPath,
+                'error' => $e->getMessage()
+            ]);
+
+            return '';
+        }
+    }
+    protected function extractTextFromCSV(string $fullPath): string
+    {
+        try {
+            $delimiter = $this->detectCsvDelimiter($fullPath);
+
+            $rows = [];
+            $handle = fopen($fullPath, 'r');
+
+            if (!$handle) return '';
+
+            while (($data = fgetcsv($handle, 0, $delimiter)) !== false) {
+
+                if (count(array_filter($data)) === 0) continue;
+
+                $rows[] = implode(' | ', $data);
+            }
+
+            fclose($handle);
+
+            return $this->normalizeText(implode("\n", $rows));
+
+        } catch (\Throwable $e) {
+            Log::error("CSV extraction failed", [
+                'file' => $fullPath,
+                'error' => $e->getMessage()
+            ]);
+
+            return '';
+        }
+    }
+    protected function detectCsvDelimiter(string $fullPath): string
+    {
+        $delimiters = [',', ';', "\t", '|'];
+
+        $handle = fopen($fullPath, 'r');
+        if (!$handle) return ',';
+
+        $line = fgets($handle);
+        fclose($handle);
+
+        if (!$line) return ',';
+
+        $scores = [];
+
+        foreach ($delimiters as $delim) {
+            $scores[$delim] = count(str_getcsv($line, $delim));
+        }
+
+        // pick delimiter with most columns
+        return array_search(max($scores), $scores, true) ?: ',';
+    }
+
     /**
      * Indexe un produit standard dans un document
      */
@@ -1429,5 +1709,24 @@ class IndexService
 
             default => 3,
         };
+    }
+    protected function publishProgress(
+        string $siteId,
+        string $message,
+        int $progress,
+        bool $done = false,
+        string $type = 'indexing_progress',
+        array $extra = []
+    ): void {
+
+        $this->mercureService->post(
+            "site/{$siteId}/knowledge/indexing",
+            array_merge([
+                'type' => $type,
+                'progress' => $progress,
+                'message' => $message,
+                'done' => $done,
+            ], $extra)
+        );
     }
 }
