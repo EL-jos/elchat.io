@@ -9,6 +9,8 @@ use App\Models\Page;
 use App\Models\Site;
 use App\Services\crawl\CrawlService;
 use App\Services\IndexService;
+use App\Services\lexical\LexicalIndexService;
+use App\Services\MercureService;
 use App\Services\vector\VectorIndexService;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -27,27 +29,39 @@ class SitemapPageBatchJob implements ShouldQueue
     public function handle(
         CrawlService $crawlService,
         IndexService $indexService,
-        VectorIndexService $vectorIndexService
+        VectorIndexService $vectorIndexService,
+        LexicalIndexService $lexicalIndexService,
     ) {
         $site = Site::findOrFail($this->siteId);
 
         $jobs = CrawlJob::whereIn('id', $this->crawlJobIds)->get();
 
+        $total = count($jobs);
+        $done = 0;
+
         foreach ($jobs as $crawlJob) {
 
-            if ($crawlService->isExcluded($crawlJob->page_url, $site)) {
-                $crawlJob->update(['status' => 'done']);
-                continue;
-            }
-
-
-            if ($crawlJob->status !== 'pending') {
-                continue;
-            }
-
-            $crawlJob->update(['status' => 'processing']);
+            $done++;
 
             try {
+
+                if ($crawlService->isExcluded($crawlJob->page_url, $site)) {
+                    $crawlJob->update(['status' => 'done']);
+                    continue;
+                }
+
+                if ($crawlJob->status !== 'pending') {
+                    continue;
+                }
+
+                $crawlJob->update(['status' => 'processing']);
+
+                $this->notify(
+                    'indexing_progress',
+                    40 + intval(($done / max($total, 1)) * 50),
+                    "Crawl: {$crawlJob->page_url}",
+                    false
+                );
 
                 $existingPage = Page::where('site_id', $site->id)
                     ->where('url', $crawlJob->page_url)
@@ -61,25 +75,19 @@ class SitemapPageBatchJob implements ShouldQueue
 
                     if (!empty($chunkIds)) {
                         $vectorIndexService->deleteChunksBatch($chunkIds, "chunks_{$this->siteId}");
+                        $lexicalIndexService->deleteChunksBatch(chunkIds: $chunkIds, siteId: $this->siteId);
                         Chunk::whereIn('id', $chunkIds)->delete();
                     }
 
                     $existingPage->delete();
                 }
 
-                // 🔥 MÊME moteur que le crawl URL
                 $page = $crawlService->crawlSinglePage(
                     $site,
                     $crawlJob->page_url,
                     0,
                     $crawlJob->id
                 );
-
-                Log::info("Dans Sitemap Page Batch Job",[
-                    'siteId' => $site->name,
-                    'page' => $page ? $page->id : '***',
-                    'page_url'=> $page ? $page->url : '***'
-                ]);
 
                 if ($page) {
                     $indexService->indexPage($page, [
@@ -91,10 +99,18 @@ class SitemapPageBatchJob implements ShouldQueue
                 $crawlJob->update(['status' => 'done']);
 
             } catch (\Throwable $e) {
+
                 $crawlJob->update([
                     'status' => 'error',
                     'error_message' => $e->getMessage(),
                 ]);
+
+                $this->notify(
+                    'indexing_warning',
+                    0,
+                    "Erreur: {$crawlJob->page_url}",
+                    false
+                );
 
                 Log::error("Erreur crawl sitemap {$crawlJob->page_url}", [
                     'site_id' => $site->id,
@@ -103,8 +119,27 @@ class SitemapPageBatchJob implements ShouldQueue
             }
         }
 
-        // ✅ même sortie que crawl URL
+        $this->notify(
+            'indexing_progress',
+            100,
+            'Batch terminé',
+            true
+        );
+
         CheckCrawlCompletionJob::dispatch($site->id);
+    }
+
+    private function notify(string $type, int $progress, string $message, bool $done = false): void
+    {
+        app(MercureService::class)->post(
+            "site/{$this->siteId}/knowledge/indexing",
+            [
+                'type' => $type,
+                'progress' => $progress,
+                'message' => $message,
+                'done' => $done,
+            ]
+        );
     }
 }
 

@@ -12,10 +12,15 @@ class LLMService
     protected string $primaryModel = 'openai/gpt-4o-mini';
     protected string $fallbackModel = 'anthropic/claude-3.5-haiku';
     protected int $maxRetries = 3;
-    protected int $timeout = 15;
+    protected int $timeout = 120;
 
     public function chat(array $messages, array $options = []): string
     {
+        Log::info("DANS CHAT JSON => CHAT", [
+            "messages" => $messages,
+            "options" => $options
+        ]);
+
         $model = $options['model'] ?? $this->primaryModel;
 
         for ($attempt = 1; $attempt <= $this->maxRetries; $attempt++) {
@@ -58,6 +63,8 @@ class LLMService
             'max_tokens' => $options['max_tokens'] ?? 800,
         ];
 
+        Log::info("max_tokens et temperature", $payload);
+
         $response = Http::timeout($this->timeout)
             ->withHeaders([
                 'Authorization' => 'Bearer ' . env('OPENROUTER_API_KEY'),
@@ -77,6 +84,10 @@ class LLMService
 
     public function chatJson(array $messages, array $options = []): array
     {
+        Log::info("DANS CHAT JSON", [
+           "messages" => $messages,
+            "options" => $options
+        ]);
         $response = $this->chat($messages, $options);
 
         return $this->safeJsonDecode($response);

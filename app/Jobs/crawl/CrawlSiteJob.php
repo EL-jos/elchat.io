@@ -3,15 +3,21 @@
 
 namespace App\Jobs\crawl;
 
+use App\Models\Chunk;
 use App\Models\CrawlJob;
+use App\Models\Page;
 use App\Models\Site;
 use App\Services\CrawlService;
+use App\Services\IndexService;
+use App\Services\lexical\LexicalIndexService;
 use App\Services\MercureService;
+use App\Services\vector\VectorIndexService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Throwable;
 
@@ -20,10 +26,15 @@ use Throwable;
 
 class CrawlSiteJob implements ShouldQueue
 {
-    use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
+    use Dispatchable;
+    use InteractsWithQueue;
+    use Queueable;
+    use SerializesModels;
 
     public $timeout = 0;
+
     public $tries = 1;
+
     protected string $siteId;
 
     public function __construct(string $siteId)
@@ -31,12 +42,25 @@ class CrawlSiteJob implements ShouldQueue
         $this->siteId = $siteId;
     }
 
-    public function handle(CrawlService $crawlService, MercureService $mercureService)
-    {
+    public function handle(
+        CrawlService $crawlService,
+        IndexService $indexService,
+        VectorIndexService $vectorIndexService,
+        LexicalIndexService $lexicalIndexService,
+        MercureService $mercureService,
+    ) {
+
         $site = Site::findOrFail($this->siteId);
 
-        // 1️⃣ Préparer toutes les URLs à crawler
+        DB::transaction(function () use ($site) {
+
+            CrawlJob::where('site_id', $site->id)
+                ->delete();
+
+        });
+
         $allUrls = $crawlService->prepareQueue($site);
+
         $total = count($allUrls);
 
         $mercureService->post(
@@ -45,57 +69,204 @@ class CrawlSiteJob implements ShouldQueue
                 'type' => 'indexing_info',
                 'progress' => 0,
                 'message' => "{$total} pages détectées",
-                'done' => false
+                'done' => false,
             ]
         );
 
-        if (empty($allUrls)) {
-            $site->update(['status' => 'ready']);
+        if ($total === 0) {
+
+            $site->update([
+                'status' => 'ready'
+            ]);
+
             $mercureService->post(
                 "site/{$site->id}/knowledge/indexing",
                 [
                     'type' => 'indexing_warning',
                     'progress' => 100,
-                    'message' => "Aucune page trouvée",
-                    'done' => true
+                    'message' => 'Aucune page trouvée',
+                    'done' => true,
                 ]
             );
+
             return;
         }
 
-        // 2️⃣ Créer un crawl_job pour chaque URL
         foreach ($allUrls as $item) {
+
             CrawlJob::create([
                 'site_id' => $site->id,
                 'page_url' => $item['url'],
                 'status' => 'pending',
-                'source' => 'crawl'
+                'source' => 'crawl',
             ]);
         }
 
-        // 3️⃣ Dispatcher les batches de pages
-        $batchSize = 5;
-        $crawlJobs = CrawlJob::where('site_id', $site->id)
-            ->where('status', 'pending')
-            ->get();
+        $processed = 0;
 
-        foreach ($crawlJobs->chunk($batchSize) as $chunk) {
-            $urlsBatch = $chunk->pluck('page_url')->toArray();
-            CrawlPageBatchJob::dispatch($site->id, $urlsBatch);
+        foreach ($allUrls as $item) {
+
+            $url = $item['url'];
+
+            $crawlJob = CrawlJob::where('site_id', $site->id)
+                ->where('page_url', $url)
+                ->first();
+
+            try {
+
+                $crawlJob->update([
+                    'status' => 'processing'
+                ]);
+
+                if ($crawlService->isExcluded($url, $site)) {
+
+                    $crawlJob->update([
+                        'status' => 'done'
+                    ]);
+
+                    $processed++;
+
+                    $this->sendProgress(
+                        site: $site,
+                        mercureService: $mercureService,
+                        processed: $processed,
+                        total: $total,
+                        message: "Page exclue : {$url}"
+                    );
+
+                    continue;
+                }
+
+                $existingPage = Page::where('site_id', $site->id)
+                    ->where('url', $url)
+                    ->first();
+
+                if ($existingPage) {
+
+                    $chunkIds = Chunk::where('page_id', $existingPage->id)
+                        ->pluck('id')
+                        ->toArray();
+
+                    if (!empty($chunkIds)) {
+
+                        $vectorIndexService->deleteChunksBatch(
+                            $chunkIds,
+                            collection: "chunks_{$site->id}"
+                        );
+
+                        $lexicalIndexService->deleteChunksBatch(
+                            chunkIds: $chunkIds,
+                            siteId: $site->id
+                        );
+
+                        Chunk::whereIn('id', $chunkIds)->delete();
+                    }
+
+                    $existingPage->delete();
+                }
+
+                $page = $crawlService->crawlSinglePage(
+                    $site,
+                    $url,
+                    0,
+                    $crawlJob->id
+                );
+
+                if ($page) {
+
+                    $indexService->indexPage(
+                        $page,
+                        [
+                            'source' => 'crawl',
+                            'site_id' => $site->id,
+                        ]
+                    );
+                }
+
+                $crawlJob->update([
+                    'status' => 'done'
+                ]);
+
+            } catch (\Throwable $e) {
+
+                Log::error(
+                    "Erreur crawl page",
+                    [
+                        'url' => $url,
+                        'site_id' => $site->id,
+                        'error' => $e->getMessage(),
+                    ]
+                );
+
+                $crawlJob->update([
+                    'status' => 'error',
+                    'error_message' => $e->getMessage(),
+                ]);
+            }
+
+            $processed++;
+
+            $this->sendProgress(
+                site: $site,
+                mercureService: $mercureService,
+                processed: $processed,
+                total: $total,
+                message: "Page traitée : {$url}"
+            );
         }
 
-        $site->update(['status' => 'crawling']);
+        $site->update([
+            'status' => 'ready'
+        ]); 
+
+        $mercureService->post(
+            "site/{$site->id}/knowledge/indexing",
+            [
+                'type' => 'indexing_progress',
+                'progress' => 100,
+                'message' => 'Crawl terminé',
+                'done' => true,
+            ]
+        );
+    }
+
+    private function sendProgress(
+        Site $site,
+        MercureService $mercureService,
+        int $processed,
+        int $total,
+        string $message
+    ) {
+
+        $progress = min(
+            99,
+            intval(($processed / $total) * 100)
+        );
+
+        $mercureService->post(
+            "site/{$site->id}/knowledge/indexing",
+            [
+                'type' => 'indexing_progress',
+                'progress' => $progress,
+                'message' => $message,
+                'done' => false,
+            ]
+        );
     }
 
     public function failed(Throwable $e)
     {
-        $site = Site::find($this->siteId);
-        if ($site) {
-            $site->update(['status' => 'error']);
-            Log::error("CrawlSiteJob échoué pour site {$this->siteId}", [
-                'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString(),
+        Site::where('id', $this->siteId)
+            ->update([
+                'status' => 'error'
             ]);
-        }
+
+        Log::error(
+            "CrawlSiteJob failed",
+            [
+                'site_id' => $this->siteId,
+                'error' => $e->getMessage(),
+            ]
+        );
     }
 }

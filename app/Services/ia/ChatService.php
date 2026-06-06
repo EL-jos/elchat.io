@@ -341,10 +341,10 @@ class ChatService
                     }
                 }
 
-            } elseif (!empty($bestResults->entities)) {
+            }/* elseif (!empty($bestResults->entities)) {
 
                 $validatedResponse .= "\n\n---\n\n **Ressources utiles :**";
-            }
+            }*/
 
             return new ChatResponse(
                 message: $validatedResponse,
@@ -363,7 +363,7 @@ class ChatService
     /**
      * Appel LLM avec PERSONA EMPLOYÉ INTERNE
      */
-    private function callLLM(Site $site, array $prompt, string $question): string
+    public function callLLM(Site $site, array $prompt, string $question): string
     {
         $companyName = $site->name ?? parse_url($site->url, PHP_URL_HOST);
         /**

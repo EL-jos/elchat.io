@@ -4,6 +4,7 @@ namespace App\Jobs\sitemap;
 
 use App\Models\Document;
 use App\Models\Site;
+use App\Services\MercureService;
 use Carbon\Carbon;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -32,68 +33,108 @@ class GenerateSitemapJob implements ShouldQueue
     {
         $site = Site::findOrFail($this->siteId);
 
+        $this->notify('indexing_progress', 0, 'Initialisation du sitemap...', false);
+
         $baseUrl = rtrim($site->url, '/');
+        $host = parse_url($baseUrl, PHP_URL_HOST);
 
         $client = new HttpBrowser(HttpClient::create([
             'timeout' => 60,
-            //'max_redirects' => 3,
         ]));
 
-        $host = parse_url($baseUrl, PHP_URL_HOST);
-
         $visited = [];
-        $toVisit = [ ['url' => $baseUrl, 'depth' => 0] ]; // on stocke aussi la profondeur
+        $toVisit = [['url' => $baseUrl, 'depth' => 0]];
 
-        while (!empty($toVisit) && count($visited) < $this->maxUrls) {
-            $current = array_shift($toVisit);
-            $url = $current['url'];
-            $depth = $current['depth'];
+        $totalEstimated = 100; // base simplifiée pour UX
+        $stepProgress = 0;
 
-            if (isset($visited[$url]) || $depth > $this->maxDepth) {
-                continue;
-            }
+        try {
 
-            try {
-                $crawler = $client->request('GET', $url);
-                $visited[$url] = true;
+            while (!empty($toVisit) && count($visited) < $this->maxUrls) {
 
-                // 🔹 Si on n’a pas atteint la profondeur max, ajouter les liens directs
-                if ($depth < $this->maxDepth) {
-                    $crawler->filter('a[href]')->each(function (Crawler $node) use (&$toVisit, &$visited, $host, $baseUrl, $depth) {
-                        $href = trim($node->attr('href'));
+                $current = array_shift($toVisit);
+                $url = $current['url'];
+                $depth = $current['depth'];
 
-                        if (empty($href) ||
-                            str_starts_with($href, '#') ||
-                            str_starts_with($href, 'mailto:') ||
-                            str_starts_with($href, 'tel:')
-                        ) {
-                            return;
-                        }
-
-                        // URL relative
-                        if (str_starts_with($href, '/')) {
-                            $href = $baseUrl . $href;
-                        }
-
-                        $parsedHost = parse_url($href, PHP_URL_HOST);
-                        if ($parsedHost === $host) {
-                            $href = rtrim($href, '/');
-                            if (!isset($visited[$href])) {
-                                $toVisit[] = ['url' => $href, 'depth' => $depth + 1];
-                            }
-                        }
-                    });
+                if (isset($visited[$url]) || $depth > $this->maxDepth) {
+                    continue;
                 }
 
-            } catch (\Throwable) {
-                // Ignore les erreurs HTTP
-                continue;
+                try {
+                    $this->notify(
+                        'indexing_progress',
+                        min(80, intval((count($visited) / $this->maxUrls) * 80)),
+                        "Analyse : {$url}",
+                        false
+                    );
+
+                    $crawler = $client->request('GET', $url);
+                    $visited[$url] = true;
+
+                    if ($depth < $this->maxDepth) {
+                        $crawler->filter('a[href]')->each(function (Crawler $node) use (&$toVisit, &$visited, $host, $baseUrl, $depth) {
+
+                            $href = trim($node->attr('href'));
+
+                            if (
+                                empty($href) ||
+                                str_starts_with($href, '#') ||
+                                str_starts_with($href, 'mailto:') ||
+                                str_starts_with($href, 'tel:')
+                            ) {
+                                return;
+                            }
+
+                            if (str_starts_with($href, '/')) {
+                                $href = $baseUrl . $href;
+                            }
+
+                            $parsedHost = parse_url($href, PHP_URL_HOST);
+
+                            if ($parsedHost === $host) {
+                                $href = rtrim($href, '/');
+
+                                if (!isset($visited[$href])) {
+                                    $toVisit[] = ['url' => $href, 'depth' => $depth + 1];
+                                }
+                            }
+                        });
+                    }
+
+                } catch (\Throwable $e) {
+                    // warning non bloquant
+                    $this->notify('indexing_warning', 0, "Erreur sur {$url}", false);
+                    continue;
+                }
             }
+
+            // STEP 2: BUILD SITEMAP
+            $this->notify('indexing_progress', 85, 'Génération du fichier sitemap...', false);
+
+            $document = $this->saveSitemapDocument(array_keys($visited), $site);
+
+            // STEP 3: DONE
+            $this->notify(
+                'indexing_progress',
+                100,
+                'Sitemap généré avec succès',
+                true
+            );
+
+            return;
+
+        } catch (\Throwable $e) {
+
+            $this->notify(
+                'indexing_error',
+                0,
+                'Erreur critique : ' . $e->getMessage(),
+                true
+            );
+
+            throw $e;
         }
-
-        $this->saveSitemapDocument(array_keys($visited), $site);
     }
-
     private function moveFileFromContent(string $content, string $extension = 'xml'): string
     {
         $filename = (string) Str::uuid() . '.' . $extension;
@@ -108,7 +149,6 @@ class GenerateSitemapJob implements ShouldQueue
 
         return $relativePath;
     }
-
     private function deleteImage(string $path): void
     {
         $fullPath = public_path($path);
@@ -116,7 +156,6 @@ class GenerateSitemapJob implements ShouldQueue
             unlink($fullPath);
         }
     }
-
     private function saveSitemapDocument(array $urls, Site $site): Document
     {
         $xml = new \XMLWriter();
@@ -154,5 +193,17 @@ class GenerateSitemapJob implements ShouldQueue
         ]);
 
         return $site->documents()->save($document);
+    }
+    private function notify(string $type, int $progress = 0, string $message = '', bool $done = false): void
+    {
+        app(MercureService::class)->post(
+            "site/{$this->siteId}/generate/sitemap",
+            [
+                'type' => $type,
+                'progress' => $progress,
+                'message' => $message,
+                'done' => $done,
+            ]
+        );
     }
 }

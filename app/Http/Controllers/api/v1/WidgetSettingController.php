@@ -178,6 +178,7 @@ class WidgetSettingController extends Controller
             'min_similarity_score' => 'nullable|numeric|min:0|max:1',
             'fallback_message' => 'nullable|string|max:255',
             'ai_role_id' => 'nullable|string|exists:ai_roles,id',
+            'require_authentication' => 'nullable|boolean',
         ]);
 
         $widgetSetting->update($validated);

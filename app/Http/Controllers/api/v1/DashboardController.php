@@ -469,6 +469,8 @@ class DashboardController extends Controller
             'settings' => $settings,
 
             'knowledge_quality_socre' => $site->knowledgeQualityScore,
+
+            'evaluations' => $site->ragEvaluationRuns->makeHidden(["total_queries", "retrieval_score", "answer_quality_score", "groundedness_score", "ranking_score", "generation_score", "hallucination_rate", "metrics_breakdown"])
         ]);
     }/*
     {

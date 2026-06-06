@@ -105,7 +105,10 @@ class PageController extends Controller
             'status' => 'crawling'
         ]);
 
-        RecrawlSinglePageJob::dispatch($page->id);
+        RecrawlSinglePageJob::dispatch(
+            pageId: $page->id,
+            siteId: $page->site_id
+        );
 
         return response()->json([
             'message' => 'Recrawl started',

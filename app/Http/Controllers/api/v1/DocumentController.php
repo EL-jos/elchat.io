@@ -19,6 +19,7 @@ class DocumentController extends Controller
      */
     public function store(Request $request, Site $site)
     {
+
         //dd($request->all(), $site);
         $request->validate([
             'file' => 'required|file|max:10240|mimes:pdf,doc,docx,xls,xlsx,csv,txt',
@@ -33,11 +34,15 @@ class DocumentController extends Controller
 
             Log::info("Document uploadé: {$document->path}");
 
-            // Dispatch indexation
             $site->update(['status' => 'indexing']); // site en cours d'indexation
 
-            // Dispatch indexation
-            IndexDocumentJob::dispatch($document ,$site); // documents standards
+            if (!empty($mapping) && $mapping !== []){
+                // Dispatch indexation
+                ProductImportJob::dispatch($document, $mapping, $site);
+            }else{
+                // Dispatch indexation
+                IndexDocumentJob::dispatch($document ,$site); // documents standards
+            }
 
             return response()->json([
                 'success' => true,

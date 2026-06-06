@@ -18,7 +18,7 @@ class IndexProductBatchJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public $timeout = 300;
+    public $timeout = 18000;
 
     public function __construct(
         public array $products,

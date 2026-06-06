@@ -38,7 +38,7 @@
             position: 'bottom-right',
             offsetX: '1rem',
             offsetY: '1rem',
-            html: '<img src="https://elchat-widget.promogifts.ma/assets/svg/logo_white.svg" style="user-select: none; pointer-events: none" width="70" alt="Chat" />',
+            html: '<img src="https://elchat-widget.promogifts.ma/assets/icon-quickmenu-chatbot.gif" style="user-select: none; pointer-events: none" width="70" alt="Chat" />',
         },
         auto_open_delay: 5 // pas d'auto-open par défaut
     };
@@ -85,7 +85,7 @@
         btn.id = 'elchat-btn';
         //btn.innerText = config.button.text;
         btn.innerHTML = config.button.html;
-        btn.innerHTML = '<img src="https://elchat-widget.promogifts.ma/assets/svg/logo_white.svg" style="user-select: none; pointer-events: none" width="70" alt="Chat" />';
+        btn.innerHTML = '<img src="https://elchat-widget.promogifts.ma/assets/icon-quickmenu-chatbot.gif" style="user-select: none; pointer-events: none; width: 100%; height: 100%; object-fit: cover; border-radius: 50%;" alt="ELChat" />';
         btn.setAttribute('aria-label', config.button.text);
 
         Object.assign(btn.style, {
@@ -94,14 +94,17 @@
             width: '60px',
             height: '60px',
             borderRadius: '50%',
-            background: config.button.background,
+            //background: config.button.background,
+            background: 'linear-gradient(92.89deg, #ff9f9f 2.27%, #ef9cff 55.18%, #b8f8ff 97.46%)',
             color: config.button.color,
             border: 'none',
             cursor: 'pointer',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            boxShadow: '0 4px 6px rgba(0,0,0,0.2)'
+            boxShadow: '0 4px 6px rgba(0,0,0,0.2)',
+            padding: '1px',
+            overflow: 'hidden',
         });
 
         // position

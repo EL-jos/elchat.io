@@ -5,13 +5,16 @@ namespace App\Http\Controllers\api\v1;
 use App\Http\Controllers\Controller;
 use App\Jobs\ComputeKnowledgeQualityJob;
 use App\Jobs\crawl\CrawlSiteJob;
+use App\Jobs\evaluation\EvaluateRagJob;
 use App\Jobs\sitemap\GenerateSitemapJob;
 use App\Models\Chunk;
 use App\Models\Document;
 use App\Models\Page;
+use App\Models\RagEvaluationRun;
 use App\Models\Site;
 use App\Models\WidgetSetting;
 use App\Services\CrawlService;
+use App\Services\evaluation\QueryGenerationService;
 use App\Services\IndexService;
 use App\Services\lexical\LexicalIndexService;
 use App\Services\MercureService;
@@ -183,11 +186,17 @@ class SiteController extends Controller
             ->where('account_id', auth()->user()->ownedAccount->id)
             ->firstOrFail();
 
-        // Dispatch le Job en arrière-plan
-        CrawlSiteJob::dispatch($site->id);
+        if ($site->status === 'crawling') {
+            return response()->json([
+                'message' => 'Un crawl est déjà en cours.'
+            ], 409);
+        }
 
         // Mettre directement le status à "crawling" pour l'utilisateur
         $site->update(['status' => 'crawling']);
+
+        // Dispatch le Job en arrière-plan
+        CrawlSiteJob::dispatch($site->id);
 
         $mercureService->post(
             "site/{$site->id}/knowledge/indexing",
@@ -200,7 +209,7 @@ class SiteController extends Controller
         );
 
         return response()->json([
-            'message' => 'Crawl started in background',
+            'message' => 'Crawl lancé en arrière-plan',
             'site' => $site
         ]);
     }
@@ -482,7 +491,7 @@ class SiteController extends Controller
         ], 202);
 
     }
-    public function calculateKnowledgeQuality(Request $request){
+    /*public function calculateKnowledgeQuality(Request $request){
 
         $validator = Validator::make($request->all(), [
             'site_id' => 'required|uuid|exists:sites,id',
@@ -500,6 +509,30 @@ class SiteController extends Controller
             'message' => $siteId
                 ? "Recalcul du KQI pour le site $siteId lancé."
                 : "Recalcul du KQI pour tous les sites lancé."
+        ]);
+    }*/
+    public function calculateKnowledgeQuality(Request $request, QueryGenerationService $queryGenerationService)
+    {
+        $validator = Validator::make($request->all(), [
+            'site_id' => 'required|uuid|exists:sites,id',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['error' => $validator->errors()], 400);
+        }
+
+        $siteId = $request->input('site_id');
+
+        $run = RagEvaluationRun::create([
+            'site_id' => $siteId,
+            'status' => 'running',
+        ]);
+
+        EvaluateRagJob::dispatch($run->id);
+
+        return response()->json([
+            'message' => 'RAG evaluation started',
+            'run_id' => $run->id
         ]);
     }
 }

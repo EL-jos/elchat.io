@@ -45,9 +45,9 @@ class IndexService
         try {
             $chunks = $this->buildChunks($page);
 
-            Log::info("CHUNKS", [
+            /*Log::info("CHUNKS", [
                 'chunk' => $chunks,
-            ]);
+            ]);*/
 
             $this->lexicalIndexService->ensureIndex($page->site_id);
 
@@ -55,9 +55,9 @@ class IndexService
                 $textChunk = $chunkData['text'];
                 $priority  = $chunkData['priority'];
 
-                Log::info("DANS INDEX PAGES contenu du chunk: ", [
+                /*Log::info("DANS INDEX PAGES contenu du chunk: ", [
                     'text chunk' => $textChunk,
-                ]);
+                ]);*/
 
 
                 if ($this->chunkAlreadyExists($page, $textChunk)) continue;
@@ -140,20 +140,20 @@ class IndexService
         // Cas 1 : contenu structuré (JSON depuis CrawlService B)
         $decoded = json_decode($page->content, true);
 
-        Log::info("DANS BUILD CHUNKS ", [
+        /*Log::info("DANS BUILD CHUNKS ", [
             'decoded' => $decoded,
             'page_id' => $page->id,
             'page_title' => $page->title,
-        ]);
+        ]);*/
 
         if (is_array($decoded)) {
-            Log::info("EST UN TABLEAU  ");
+            //Log::info("EST UN TABLEAU  ");
             if (isset($decoded['sections'])) {
                 $decoded = $decoded['sections'];
             }
             return $this->buildChunksFromSections($page, $decoded);
         }
-        Log::info("EST UN TEXTE NORAL ");
+        //Log::info("EST UN TEXTE NORAL ");
         // Cas 2 : contenu brut (fallback robuste)
         return $this->buildChunksFromRawText($page);
     }
@@ -204,7 +204,7 @@ class IndexService
     }*/
     protected function buildChunksFromSections(Page $page, array $sections): array
     {
-        Log::info("DANS BUILD CHUNKS FRO SECTIONS ");
+        //Log::info("DANS BUILD CHUNKS FRO SECTIONS ");
         $chunks = [];
 
         $buffer = '';
@@ -217,10 +217,10 @@ class IndexService
 
         foreach ($sections as $i => $section) {
 
-            Log::info("SECTION CONCERNEE ", [
+            /*Log::info("SECTION CONCERNEE ", [
                 'section' => $section,
                 'content' => trim($section['content'] ?? '')
-            ]);
+            ]);*/
 
             $content = trim($section['content'] ?? '');
             if ($content === '') continue;
@@ -246,9 +246,9 @@ class IndexService
 
             $buffer = trim($buffer);
 
-            Log::info("BUFFER AVANT SHOULD FLUSH BUFFER ", [
+            /*Log::info("BUFFER AVANT SHOULD FLUSH BUFFER ", [
                 'buffer' => $buffer,
-            ]);
+            ]);*/
 
             // 🔥 flush intelligent
             if ($this->shouldFlushBuffer($buffer, $content, $i, $sections)) {
@@ -258,9 +258,9 @@ class IndexService
                     $this->createSmartChunks($page, $buffer, $bufferMeta)
                 );
 
-                Log::info("flush intelligent ", [
+                /*Log::info("flush intelligent ", [
                     'chunks' => $chunks,
-                ]);
+                ]);*/
 
                 $buffer = '';
                 $bufferMeta = [
@@ -274,19 +274,19 @@ class IndexService
 
         // flush final
         if (trim($buffer) !== '') {
-            Log::info("BUFFER ", [
+            /*Log::info("BUFFER ", [
                 'buffer' => $buffer,
-            ]);
+            ]);*/
             $chunks = array_merge(
                 $chunks,
                 $this->createSmartChunks($page, $buffer, $bufferMeta)
             );
         }
 
-        Log::info("SECTION CONCERNEE SORTIE ", [
+        /*Log::info("SECTION CONCERNEE SORTIE ", [
             'buffer' => $buffer,
             'chunks' => $chunks
-        ]);
+        ]);*/
 
         // 🔥 DEDUP GLOBAL FINAL (CRUCIAL)
         return $this->deduplicateChunks($chunks, $page);
@@ -294,7 +294,7 @@ class IndexService
     protected function createSmartChunks(Page $page, string $buffer, array $meta): array
     {
 
-        Log::info("DANS CREATE SART CHUNKS ");
+        //Log::info("DANS CREATE SART CHUNKS ");
         $header = implode("\n", array_filter([
             $page->title ? "Page: {$page->title}" : null,
             $meta['h1'] ?? null,
@@ -333,9 +333,9 @@ class IndexService
                 'type' => ($meta['h2'] ?? '') === 'Overview' ? 'overview' : 'section',
             ];
 
-            Log::info("CHUNKS COUURE ", [
+            /*Log::info("CHUNKS COUURE ", [
                 'chunks' => $chunks,
-            ]);
+            ]);*/
 
         }
 
@@ -345,13 +345,13 @@ class IndexService
     {
         $total = count($sections);
 
-        Log::info("DANS SHOULD FLUSH BUFFER ", [
+        /*Log::info("DANS SHOULD FLUSH BUFFER ", [
             'buffer' => $buffer,
             'current' => $current,
             'i' => $i,
             'sections' => $sections,
             'total' => $total,
-        ]);
+        ]);*/
 
         // 🔥 PRIORITÉ MAX : changement de bloc logique
         if ($i < $total - 1) {
@@ -361,12 +361,12 @@ class IndexService
             $nextH3 = $next['h3'] ?? null;
             // 🔴 CAS 1 : les deux ont h3 → flush si différent
             if ($currentH3 !== null && $nextH3 !== null && $currentH3 !== $nextH3) {
-                Log::info("CAS 1 : les deux ont h3 → flush si différent");
+                //Log::info("CAS 1 : les deux ont h3 → flush si différent");
                 return true;
             }
             // 🔴 CAS 2 : un a h3 et l'autre non → flush aussi
             if (($currentH3 === null && $nextH3 !== null) || ($currentH3 !== null && $nextH3 === null)) {
-                Log::info("CAS 2 : un a h3 et l'autre non → flush aussi");
+                //Log::info("CAS 2 : un a h3 et l'autre non → flush aussi");
                 return true;
             }
 
@@ -374,13 +374,13 @@ class IndexService
 
         // trop petit → continue
         if (mb_strlen($buffer) < 500) {
-            Log::info("trop petit → continue");
+            //Log::info("trop petit → continue");
             return false;
         }
 
         // trop grand → flush
         if (mb_strlen($buffer) > 1200) {
-            Log::info("trop grand → flush");
+            //Log::info("trop grand → flush");
             return true;
         }
 
@@ -389,22 +389,22 @@ class IndexService
             $next = $sections[$i + 1] ?? null;
 
             if ($next && ($next['h2'] ?? null) !== ($sections[$i]['h2'] ?? null)) {
-                Log::info("changement de logique (h2 change)");
+                //Log::info("changement de logique (h2 change)");
                 return true;
             }
         }
 
-        Log::info("RIEN DE TOUT CA ");
+        //Log::info("RIEN DE TOUT CA ");
 
         return false;
     }
     protected function deduplicateChunks(array $chunks, Page $page): array
     {
-        Log::info("DANS DEDULICATECHUNKS ", [
+        /*Log::info("DANS DEDULICATECHUNKS ", [
             'chunks' => $chunks,
             'page_id' => $page->id,
             'age_title' => $page->title,
-        ]);
+        ]);*/
         $seen = [];
         $final = [];
 
@@ -424,10 +424,10 @@ class IndexService
             $final[] = $chunk;
         }
 
-        Log::info("SORTIE DE  DEDULICATECHUNKS ", [
+        /*Log::info("SORTIE DE  DEDULICATECHUNKS ", [
             'seen' => $seen,
             'final' => $final,
-        ]);
+        ]);*/
 
         return $final;
     }
@@ -501,18 +501,18 @@ class IndexService
     }*/
     protected function chunkBySentences(string $text, int $maxChars, int $overlapSentences = 1): array
     {
-        Log::info('CHUNK_START', [
+        /*Log::info('CHUNK_START', [
             'text_length' => mb_strlen($text),
             'maxChars' => $maxChars,
             'overlapSentences' => $overlapSentences,
-        ]);
+        ]);*/
 
         // 🔥 fallback si peu de phrases
         if (substr_count($text, '.') < 2 && mb_strlen($text) > 300) {
-            Log::info('CHUNK_FALLBACK_TRIGGERED', [
+            /*Log::info('CHUNK_FALLBACK_TRIGGERED', [
                 'reason' => 'not_enough_sentences',
                 'dot_count' => substr_count($text, '.'),
-            ]);
+            ]);*/
 
             return $this->chunkText($text, 120, 0.2);
         }
@@ -521,15 +521,15 @@ class IndexService
         $sentences = array_map('trim', $sentences);
         $sentences = array_filter($sentences);
 
-        Log::info('CHUNK_SENTENCES_SPLIT', [
+        /*Log::info('CHUNK_SENTENCES_SPLIT', [
             'count' => count($sentences),
             'sentences_preview' => array_slice($sentences, 0, 5),
-        ]);
+        ]);*/
 
         if (!$sentences || count($sentences) === 0) {
-            Log::warning('CHUNK_EMPTY_SENTENCES', [
+            /*Log::warning('CHUNK_EMPTY_SENTENCES', [
                 'text_preview' => mb_substr($text, 0, 200),
-            ]);
+            ]);*/
             return [trim($text)];
         }
 
@@ -538,27 +538,27 @@ class IndexService
 
         foreach ($sentences as $index => $sentence) {
 
-            Log::debug('CHUNK_SENTENCE_PROCESSING', [
+            /*Log::debug('CHUNK_SENTENCE_PROCESSING', [
                 'index' => $index,
                 'sentence_length' => mb_strlen($sentence),
                 'sentence_preview' => mb_substr($sentence, 0, 100),
-            ]);
+            ]);*/
 
             // 🔥 phrase trop longue
             if (mb_strlen($sentence) > $maxChars) {
 
-                Log::warning('CHUNK_LONG_SENTENCE', [
+                /*Log::warning('CHUNK_LONG_SENTENCE', [
                     'index' => $index,
                     'length' => mb_strlen($sentence),
-                ]);
+                ]);*/
 
                 if (!empty($buffer)) {
                     $chunkText = implode(' ', $buffer);
 
-                    Log::info('CHUNK_FLUSH_BEFORE_LONG_SENTENCE', [
+                    /*Log::info('CHUNK_FLUSH_BEFORE_LONG_SENTENCE', [
                         'chunk_length' => mb_strlen($chunkText),
                         'chunk_preview' => mb_substr($chunkText, 0, 150),
-                    ]);
+                    ]);*/
 
                     $chunks[] = $chunkText;
                     $buffer = [];
@@ -566,9 +566,9 @@ class IndexService
 
                 $splitChunks = $this->chunkText($sentence, 120, 0.2);
 
-                Log::info('CHUNK_LONG_SENTENCE_SPLIT', [
+                /*Log::info('CHUNK_LONG_SENTENCE_SPLIT', [
                     'resulting_chunks' => count($splitChunks),
-                ]);
+                ]);*/
 
                 $chunks = array_merge($chunks, $splitChunks);
                 continue;
@@ -578,26 +578,26 @@ class IndexService
 
             if (mb_strlen($testBuffer) <= $maxChars) {
 
-                Log::debug('CHUNK_BUFFER_APPEND', [
+                /*Log::debug('CHUNK_BUFFER_APPEND', [
                     'new_length' => mb_strlen($testBuffer),
-                ]);
+                ]);*/
 
                 $buffer[] = $sentence;
 
             } else {
 
-                Log::info('CHUNK_FLUSH_MAX_REACHED', [
+                /*Log::info('CHUNK_FLUSH_MAX_REACHED', [
                     'buffer_length' => mb_strlen(implode(' ', $buffer)),
                     'next_sentence_length' => mb_strlen($sentence),
-                ]);
+                ]);*/
 
                 if (!empty($buffer)) {
                     $chunkText = implode(' ', $buffer);
 
-                    Log::info('CHUNK_CREATED', [
+                    /*Log::info('CHUNK_CREATED', [
                         'chunk_length' => mb_strlen($chunkText),
                         'chunk_preview' => mb_substr($chunkText, 0, 150),
-                    ]);
+                    ]);*/
 
                     $chunks[] = $chunkText;
                 }
@@ -605,10 +605,10 @@ class IndexService
                 // 🔁 overlap
                 $overlap = array_slice($buffer, -$overlapSentences);
 
-                Log::debug('CHUNK_OVERLAP_APPLIED', [
+                /*Log::debug('CHUNK_OVERLAP_APPLIED', [
                     'overlap_count' => count($overlap),
                     'overlap_preview' => implode(' ', $overlap),
-                ]);
+                ]);*/
 
                 $buffer = $overlap;
                 $buffer[] = $sentence;
@@ -619,26 +619,26 @@ class IndexService
         if (!empty($buffer)) {
             $chunkText = implode(' ', $buffer);
 
-            Log::info('CHUNK_FINAL_FLUSH', [
+            /*Log::info('CHUNK_FINAL_FLUSH', [
                 'chunk_length' => mb_strlen($chunkText),
                 'chunk_preview' => mb_substr($chunkText, 0, 150),
-            ]);
+            ]);*/
 
             $chunks[] = $chunkText;
         }
 
-        Log::info('CHUNK_END', [
+        /*Log::info('CHUNK_END', [
             'total_chunks' => count($chunks),
-        ]);
+        ]);*/
 
         return $chunks;
     }
     protected function computePriority(int $sectionIndex, ?string $title): int
     {
-        Log::info("SectionIndex dans computePriority", [
+        /*Log::info("SectionIndex dans computePriority", [
             "sectionIndex" => $sectionIndex,
             "title"       => $title,
-        ]);
+        ]);*/
         $score = 50; // valeur neutre par défaut
 
         if ($sectionIndex === 0) $score += 20;
@@ -686,11 +686,11 @@ class IndexService
     {
         $siteId = $document->documentable_id ?? null;
 
-        Log::info("DANS INDEX DOCUMENT", [
+        /*Log::info("DANS INDEX DOCUMENT", [
             "site_id" => $siteId,
             "context" => $context,
             "document" => $document,
-        ]);
+        ]);*/
 
         $this->publishProgress(
             $siteId,
@@ -700,16 +700,16 @@ class IndexService
 
         // 1️⃣ Canonical + Chunking (PURE CPU, PAS DB)
         $path = public_path($document->path);
-        Log::info("PATH OF FILE", [
+        /*Log::info("PATH OF FILE", [
             "path" => $path
-        ]);
+        ]);*/
         $canonical = $this->documentCanonicalService->buildCanonicalDocument(
             path: $path,
             extension: $document->extension,
             fullPath: $path
         );
 
-        Log::info("CANONICAL", $canonical);
+        //Log::info("CANONICAL", $canonical);
 
         $this->publishProgress(
             $siteId,

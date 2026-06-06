@@ -59,8 +59,16 @@ class Site extends BaseModel
     public function chunks(){
         return $this->hasMany(Chunk::class);
     }
-
     public function chatFormSubmissions(){
         return $this->hasMany(ChatFormSubmission::class);
+    }
+    public function ragEvaluationRuns(): HasMany {
+        return $this->hasMany(RagEvaluationRun::class, 'site_id');
+    }
+    public function ragEvaluationQueries(): HasMany {
+        return $this->hasMany(RagEvaluationQuery::class, 'site_id');
+    }
+    public function ragEvaluationResults(): HasMany {
+        return $this->hasMany(RagEvaluationResult::class, 'site_id');
     }
 }
