@@ -70,6 +70,7 @@ class CrawlService {
         }
 
         try {
+
             $client = HttpClient::create([
                 'timeout' => 30,
                 'headers' => $this->getHeaders(),

@@ -16,6 +16,10 @@ use App\Http\Controllers\api\v1\UserController;
 use App\Http\Controllers\api\v1\WidgetSettingController;
 use App\Http\Controllers\api\v1\WidgetVisitorController;
 use App\Http\Controllers\api\v2\CtaController;
+use App\Http\Controllers\web\v4\FacebookConnectController;
+use App\Http\Controllers\web\v4\FacebookWebhookController;
+use App\Http\Controllers\web\v4\InstagramConnectController;
+use App\Http\Controllers\web\v4\YouTubeConnectController;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\api\v1\SiteController;
 use App\Http\Controllers\api\v1\AuthController;
@@ -91,6 +95,8 @@ Route::prefix('v1')->group(function () {
         });
         Route::apiResource('site.ctas', CtaController::class);
 
+
+
     });
     Route::controller(SiteController::class)->group(function () {
         Route::get('/site/{site_id}/widget/config', 'widgetConfig');
@@ -110,5 +116,22 @@ Route::prefix('v1')->group(function () {
             Route::post('site/{site}/cta/forms/submit', 'submitForm');
         });
     });
-});
 
+
+    Route::prefix('social')->group(function () {
+
+        Route::prefix('/facebook')->controller(FacebookConnectController::class)->group(function () {
+            Route::post('/store-page/{siteId}', 'storePage');
+        });
+
+        Route::prefix('/youtube')->controller(YouTubeConnectController::class)->group(function () {
+            Route::post('/store-channel/{siteId}', 'storeChannel');
+        });
+
+        Route::prefix('/instagram')->controller(InstagramConnectController::class)->group(function () {
+            Route::post('/store-account/{siteId}', 'storeAccount');
+        });
+
+    });
+
+});

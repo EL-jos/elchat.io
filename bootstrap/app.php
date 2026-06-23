@@ -16,6 +16,13 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
+
+        $middleware->validateCsrfTokens(except: [
+            'social/*',
+            'webhook/facebook',
+            'webhook/telegram/*',  // ✅ ajout
+        ]);
+
         $middleware->alias([
             'verified' => EnsureUserIsVerified::class,
             'jwt.auth' => JwtAuthenticate::class,

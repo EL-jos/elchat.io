@@ -33,6 +33,10 @@ return [
             'bot_user_oauth_token' => env('SLACK_BOT_USER_OAUTH_TOKEN'),
             'channel' => env('SLACK_BOT_USER_DEFAULT_CHANNEL'),
         ],
+        'client_id'       => env('SLACK_CLIENT_ID'),
+        'client_secret'   => env('SLACK_CLIENT_SECRET'),
+        'redirect'        => env('SLACK_REDIRECT_URI'),
+        'signing_secret'  => env('SLACK_SIGNING_SECRET'), // ✅ requis pour SlackWebhookSecurityService
     ],
 
     'google' => [
@@ -41,4 +45,31 @@ return [
         'redirect' => env('GOOGLE_REDIRECT_URI'),
     ],
 
+    'youtube' => [
+        'videos_per_sync'  => env('YOUTUBE_VIDEOS_PER_SYNC', 25),
+        'max_comment_pages'=> env('YOUTUBE_MAX_COMMENT_PAGES', 20),
+    ],
+
+    'facebook' => [
+        'client_id' => env('FACEBOOK_CLIENT_ID'),
+        'client_secret' => env('FACEBOOK_CLIENT_SECRET'),
+        'redirect' => env('FACEBOOK_REDIRECT_URI'),
+        'webhook_verify_token' => env(
+            'FACEBOOK_VERIFY_TOKEN'
+        ),
+        'app_secret' => env(
+            'FACEBOOK_APP_SECRET'
+        ),
+        'graph_version' => env('FACEBOOK_GRAPH_VERSION', 'v25.0'),
+    ],
+
+    'instagram' => [
+        'client_id' => env('INSTAGRAM_CLIENT_ID'),
+        'client_secret' => env('INSTAGRAM_CLIENT_SECRET'),
+        'redirect' => env('INSTAGRAM_REDIRECT_URI'),
+    ],
+
+    'telegram' => [
+        'bot_api' => env('TELEGRAM_BOT_API', 'https://api.telegram.org'),
+    ]
 ];
